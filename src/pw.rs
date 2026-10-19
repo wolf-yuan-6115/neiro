@@ -219,7 +219,9 @@ pub fn run(
     let base = StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS;
     playback.connect(spa::utils::Direction::Output, None, base | StreamFlags::TRIGGER, &mut params)?;
     let mut params = [Pod::from_bytes(&fmt).unwrap()];
-    let async_flag = StreamFlags::from_bits_retain(pw::sys::pw_stream_flags_PW_STREAM_FLAG_ASYNC);
+    // PW_STREAM_FLAG_ASYNC, spelled out because PipeWire headers before ~0.3.7x
+    // (e.g. Debian 12's 0.3.65) don't define it. Older PipeWire ignores the bit.
+    let async_flag = StreamFlags::from_bits_retain(1 << 10);
     capture.connect(spa::utils::Direction::Input, None, base | async_flag, &mut params)?;
 
     let ml = mainloop.clone();
