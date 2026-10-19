@@ -94,6 +94,10 @@ pub fn run(
             "node.link-group" => "neiro",
             "node.passive" => "true",
             "node.dont-reconnect" => "true",
+            // neiro manages volume and routing itself; WirePlumber's per-stream memory
+            // would race the startup handoff and restore stale levels.
+            "state.restore-props" => "false",
+            "state.restore-target" => "false",
             "stream.dont-remix" => "true",
             "target.object" => target,
             *pw::keys::AUDIO_CHANNELS => "2",
@@ -111,6 +115,8 @@ pub fn run(
             "node.group" => "neiro",
             "node.link-group" => "neiro",
             "device.icon-name" => "audio-speakers",
+            "state.restore-props" => "false",
+            "state.restore-target" => "false",
             *pw::keys::AUDIO_CHANNELS => "2",
             "audio.position" => "FL,FR",
         },
