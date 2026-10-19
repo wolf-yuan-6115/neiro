@@ -1,12 +1,10 @@
-//! User-facing parameters. A profile from `tuning.xml` supplies the factory
-//! defaults; edits are stored as full per-profile overrides.
+//! User-facing parameters. A profile from the speaker tuning supplies the
+//! factory defaults; edits are stored as full per-profile overrides.
 
 use crate::tuning::{Profile, Tuning, NBANDS};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-pub const PROFILES: [&str; 6] = ["dynamic", "movie", "music", "game", "voice", "off"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Widener {
@@ -18,7 +16,8 @@ pub struct Widener {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeqFilter {
     pub enabled: bool,
-    /// "peak" or "highpass" (Butterworth, `order` 2 or 4).
+    /// "peak", "notch", "lowshelf", "highshelf", "lowpass" or "highpass"
+    /// (the pass filters are Butterworth of `order` 2, 4, 6 or 8).
     #[serde(default = "peak")]
     pub kind: String,
     #[serde(default = "two")]
@@ -39,7 +38,24 @@ fn two() -> u32 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Peq {
     pub enable: bool,
+    /// Left speaker's filters, also used for the right unless `right` is set.
     pub filters: Vec<PeqFilter>,
+    /// Right speaker's filters when the tuning gives it different ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<Vec<PeqFilter>>,
+}
+
+/// DAX3 speaker-PEQ type id to neiro's filter kind.
+fn peq_kind(kind: u32) -> &'static str {
+    match kind {
+        1 => "peak",
+        2 => "notch",
+        3 => "highshelf",
+        4 => "lowshelf",
+        6 | 8 => "lowpass",
+        7 | 9 => "highpass",
+        _ => "unknown",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,20 +162,22 @@ impl Params {
         Params {
             pregain_db: p.pregain_db,
             widener: Widener { enable: p.virtualizer && !off, width: (p.surround_boost_db / 12.0).clamp(0.0, 1.0) },
-            peq: Peq {
-                enable: p.peq_enable && !off,
-                filters: p
-                    .peq
-                    .iter()
-                    .map(|f| PeqFilter {
-                        enabled: f.enabled,
-                        kind: if f.kind == 7 { "highpass".into() } else { "peak".into() },
-                        order: f.order,
-                        f0: f.f0,
-                        gain_db: f.gain_db,
-                        q: f.q,
-                    })
-                    .collect(),
+            peq: {
+                let conv = |fs: &[crate::tuning::PeqFilter]| -> Vec<PeqFilter> {
+                    fs.iter()
+                        .filter(|f| peq_kind(f.kind) != "unknown")
+                        .map(|f| PeqFilter {
+                            enabled: f.enabled,
+                            kind: peq_kind(f.kind).into(),
+                            order: f.order,
+                            f0: f.f0,
+                            gain_db: f.gain_db,
+                            q: f.q,
+                        })
+                        .collect()
+                };
+                let (left, right) = (conv(&p.peq[0]), conv(&p.peq[1]));
+                Peq { enable: p.peq_enable && !off, right: (right != left).then_some(right), filters: left }
             },
             vbass: VirtualBass {
                 enable: false,
@@ -318,6 +336,10 @@ pub struct Saved {
     /// The user's own EQ, applied on top of every profile.
     #[serde(default)]
     pub personal: PersonalEq,
+    /// Tuning operating mode (convertible poses such as "tablet"); default "normal".
+    pub mode: Option<String>,
+    /// PipeWire node name of the built-in speaker sink, if auto-detection picks the wrong one.
+    pub speaker_sink: Option<String>,
 }
 
 /// The project used to be called "dax": carry its saved state over once.
@@ -352,8 +374,18 @@ impl Saved {
     }
 }
 
+/// Factory parameters for a profile. "off" exists even when the tuning has no
+/// such profile: it is then derived from the first one with every stage disabled.
 pub fn factory(t: &Tuning, profile: &str) -> Result<Params> {
-    Ok(Params::from_profile(t.profile(profile).ok_or_else(|| anyhow!("unknown profile {profile}"))?))
+    if let Some(p) = t.profile(profile) {
+        return Ok(Params::from_profile(p));
+    }
+    if profile == "off" {
+        let mut p = t.profiles[0].clone();
+        p.name = "off".into();
+        return Ok(Params::from_profile(&p));
+    }
+    Err(anyhow!("this tuning has no profile named {profile}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -402,15 +434,25 @@ pub const PERSONAL_PREFIX: &str = "/personal";
 pub fn sections(p: &Params, band_freqs: &[f32; NBANDS]) -> Vec<Section> {
     let hz = |v: f32| if v >= 1000.0 { format!("{:.1}k", v / 1000.0) } else { format!("{v:.0}") };
     let mut peq = vec![];
-    for (i, flt) in p.peq.filters.iter().enumerate() {
-        peq.push(b(format!("/peq/filters/{i}/enabled"), format!("#{i} on")));
-        peq.push(f(format!("/peq/filters/{i}/f0"), format!("#{i} freq"), 20.0, 20000.0, 5.0, "Hz"));
-        if flt.kind == "highpass" {
-            peq.push(f(format!("/peq/filters/{i}/order"), format!("#{i} HP order"), 2.0, 4.0, 2.0, ""));
-            continue;
+    let sides: Vec<(&str, &str, &Vec<PeqFilter>)> = match &p.peq.right {
+        Some(r) => vec![("filters", "L", &p.peq.filters), ("right", "R", r)],
+        None => vec![("filters", "", &p.peq.filters)],
+    };
+    for (key, side, list) in sides {
+        for (i, flt) in list.iter().enumerate() {
+            let at = |field: &str| format!("/peq/{key}/{i}/{field}");
+            let name = format!("{side}#{i} {}", flt.kind);
+            peq.push(b(at("enabled"), format!("{name} on")));
+            peq.push(f(at("f0"), format!("{side}#{i} freq"), 20.0, 20000.0, 5.0, "Hz"));
+            match flt.kind.as_str() {
+                "highpass" | "lowpass" => peq.push(f(at("order"), format!("{side}#{i} order"), 2.0, 8.0, 2.0, "")),
+                "notch" => peq.push(f(at("q"), format!("{side}#{i} Q"), 0.1, 20.0, 0.1, "")),
+                _ => {
+                    peq.push(f(at("gain_db"), format!("{side}#{i} gain"), -24.0, 12.0, 0.5, "dB"));
+                    peq.push(f(at("q"), format!("{side}#{i} Q"), 0.1, 20.0, 0.1, ""));
+                }
+            }
         }
-        peq.push(f(format!("/peq/filters/{i}/gain_db"), format!("#{i} gain"), -24.0, 12.0, 0.5, "dB"));
-        peq.push(f(format!("/peq/filters/{i}/q"), format!("#{i} Q"), 0.1, 20.0, 0.1, ""));
     }
     let mut mbc = vec![];
     for (i, _) in p.mbc.groups.iter().enumerate() {
@@ -496,8 +538,10 @@ mod tests {
 
     #[test]
     fn set_by_path() {
-        let t = crate::tuning::parse(crate::tuning::EMBEDDED_XML).unwrap();
+        let t = crate::tuning::test_tuning();
         let mut p = factory(&t, "music").unwrap();
+        assert!(p.peq.right.is_some(), "fixture's speakers differ, so both sides are exposed");
+        assert_eq!(p.peq.filters[1].kind, "notch");
         p.set("/regulator/threshold/4", serde_json::json!(-10.0)).unwrap();
         assert_eq!(p.regulator.threshold[4], -10.0);
         p.set("/vbass/enable", serde_json::json!(true)).unwrap();
@@ -517,5 +561,10 @@ mod tests {
                 }
             }
         }
+        // "off" is synthesised when a tuning lacks it, with everything disabled.
+        let tablet = crate::tuning::parse(crate::tuning::TEST_XML, Some("tablet")).unwrap();
+        let off = factory(&tablet, "off").unwrap();
+        assert!(!off.peq.enable && !off.mbc.enable && !off.limiter.enable);
+        assert!(factory(&tablet, "movie").is_err());
     }
 }

@@ -378,10 +378,10 @@ impl BandProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tuning::{parse, EMBEDDED_XML};
+    use crate::tuning::test_tuning;
 
     fn freqs() -> [f32; NBANDS] {
-        parse(EMBEDDED_XML).unwrap().band_freqs
+        test_tuning().band_freqs
     }
 
     #[test]
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn regulator_limits_resonance_only() {
-        let t = parse(EMBEDDED_XML).unwrap();
+        let t = test_tuning();
         let prof = t.profile("music").unwrap();
         let mut cfg = BandConfig::default();
         cfg.reg_enable = true;
@@ -439,7 +439,7 @@ mod tests {
     fn ieq_ignores_overall_tilt() {
         let f = freqs();
         let x = f.map(|v| v.log2());
-        let target = parse(EMBEDDED_XML).unwrap().ieq_curves["balanced"];
+        let target = test_tuning().ieq_curves["balanced"];
         // Same spectral shape at two different tilts must get the same correction.
         let bump: [f32; NBANDS] = std::array::from_fn(|b| if b == 3 { 6.0 } else { 0.0 });
         let a: [f32; NBANDS] = std::array::from_fn(|b| -20.0 - 4.0 * x[b] + bump[b]);

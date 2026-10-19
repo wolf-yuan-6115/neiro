@@ -60,6 +60,12 @@ impl Coefs {
         )
     }
 
+    pub fn notch(fs: f64, f0: f64, q: f64) -> Coefs {
+        let (c, s) = Self::w0(fs, f0);
+        let alpha = s / (2.0 * q.max(1e-3));
+        Self::norm(1.0, -2.0 * c, 1.0, 1.0 + alpha, -2.0 * c, 1.0 - alpha)
+    }
+
     pub fn lowpass(fs: f64, f0: f64, q: f64) -> Coefs {
         let (c, s) = Self::w0(fs, f0);
         let alpha = s / (2.0 * q);
@@ -87,6 +93,13 @@ impl Coefs {
 /// Butterworth Q values for cascading two biquads into a 4th-order section.
 pub const BUTTER4_Q: [f64; 2] = [0.541_196_1, 1.306_563];
 pub const BUTTER2_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
+/// Section Qs of an even-order Butterworth filter built from biquads
+/// (odd orders round up; order is capped at 8).
+pub fn butterworth_qs(order: u32) -> impl Iterator<Item = f64> {
+    let n = (order.clamp(1, 8).div_ceil(2) * 2) as f64;
+    (1..=(n as u32 / 2)).map(move |k| 1.0 / (2.0 * (std::f64::consts::PI * (2.0 * k as f64 - 1.0) / (2.0 * n)).cos()))
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct State {
@@ -138,6 +151,21 @@ mod tests {
         let hs = Coefs::highshelf(fs, 8000.0, BUTTER2_Q, -4.0);
         assert!((hs.response_db(fs, 23000.0) + 4.0).abs() < 0.1);
         assert!(hs.response_db(fs, 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn notch_and_butterworth_orders() {
+        let fs = 48000.0;
+        let n = Coefs::notch(fs, 480.0, 6.0);
+        assert!(n.response_db(fs, 480.0) < -60.0);
+        assert!(n.response_db(fs, 2000.0).abs() < 0.1);
+        let qs: Vec<f64> = butterworth_qs(4).collect();
+        assert!((qs[0] - BUTTER4_Q[0]).abs() < 1e-4 && (qs[1] - BUTTER4_Q[1]).abs() < 1e-4);
+        for order in [2, 4, 6, 8] {
+            // Every Butterworth is -3 dB at the corner, regardless of order.
+            let db: f64 = butterworth_qs(order).map(|q| Coefs::highpass(fs, 100.0, q).response_db(fs, 100.0)).sum();
+            assert!((db + 3.01).abs() < 0.05, "order {order}: {db}");
+        }
     }
 
     #[test]

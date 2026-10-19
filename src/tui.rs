@@ -64,6 +64,17 @@ fn banner_lines() -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Short tab label for Dolby's longer profile names.
+fn profile_label(p: &str) -> String {
+    if let Some(n) = p.strip_prefix("personalize_user") {
+        return format!("user{n}");
+    }
+    match p {
+        "voice_onlinecourse" => "course".into(),
+        _ => p.strip_prefix("game_").map_or_else(|| p.to_string(), |g| format!("game:{g}")),
+    }
+}
+
 /// Look up a descriptor path in the profile params or the global personal EQ.
 fn value(st: &StateView, path: &str) -> Option<serde_json::Value> {
     match path.strip_prefix(PERSONAL_PREFIX) {
@@ -543,8 +554,9 @@ impl App {
         let coarse = mods.contains(KeyModifiers::SHIFT);
         match code {
             KeyCode::Char(' ') => self.request(Request::Bypass { on: None }),
-            KeyCode::Char(c @ '1'..='6') => {
-                let i = c as usize - '1' as usize;
+            KeyCode::Char(c @ '0'..='9') => {
+                // 1..9 then 0 for the tenth profile.
+                let i = if c == '0' { 9 } else { c as usize - '1' as usize };
                 if let Some(p) = self.state.as_ref().and_then(|s| s.profiles.get(i)).cloned() {
                     self.request(Request::SetProfile { profile: p });
                     self.clamp_item();
@@ -828,7 +840,7 @@ impl App {
         let mut x = header.x + 1;
         let mut titles = vec![];
         for (i, p) in st.profiles.iter().enumerate() {
-            let t = format!("{} {}", i + 1, p);
+            let t = format!("{} {}", (i + 1) % 10, profile_label(p));
             let w = Span::raw(t.as_str()).width() as u16;
             let r = Rect::new(x, header.y + 1, w + 2, 1);
             self.hits.push((r, Hit::Tab(i)));
@@ -867,7 +879,7 @@ impl App {
             (Some((m, t)), _) if t.elapsed() < Duration::from_secs(4) => Line::from(m.clone().yellow()),
             (_, Some(hint)) => Line::from(hint).cyan(),
             _ => Line::from(match self.screen {
-                Screen::Main => " space on/off · 1-6 profile · tab focus · ↑↓ select · ←→ adjust · e toggle · s save · R reset · q quit",
+                Screen::Main => " space on/off · 1-0 profile · tab focus · ↑↓ select · ←→ adjust · e toggle · s save · R reset · q quit",
                 Screen::Pick => " type to filter · ↑↓ select · enter start · esc back",
                 Screen::Tuner => " a/b or ←/→ listen · space flip · 1 prefer A · 2 prefer B · 0 no difference · x auto-switch · esc finish · q quit",
             })
@@ -1350,14 +1362,14 @@ mod tests {
     use ratatui::Terminal;
 
     fn fake_state(tuner: Option<TunerView>) -> StateView {
-        let t = crate::tuning::parse(crate::tuning::EMBEDDED_XML).unwrap();
+        let t = crate::tuning::test_tuning();
         let params = crate::params::factory(&t, "music").unwrap();
         let mut personal = PersonalEq::default();
         personal.bands[0].gain_db = 4.5;
         personal.bands[3].gain_db = -2.0;
         StateView {
             profile: "music".into(),
-            profiles: crate::params::PROFILES.iter().map(|s| s.to_string()).collect(),
+            profiles: t.profile_names(),
             bypass: false,
             dirty: false,
             customised: false,

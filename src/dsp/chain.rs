@@ -2,7 +2,7 @@
 //! audio thread consumes.
 
 use super::bands::{self, BandConfig, BandProcessor, MbcGroupCfg, MAX_GROUPS};
-use super::biquad::{Coefs, State, BUTTER2_Q, BUTTER4_Q};
+use super::biquad::{butterworth_qs, Coefs, State, BUTTER2_Q};
 use super::limiter::{self, Limiter};
 use super::vbass::{VbConfig, VirtualBass};
 use crate::params::{Params, PersonalEq, PE_BANDS};
@@ -10,7 +10,8 @@ use crate::tuning::{Tuning, NBANDS};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub const MAX_PEQ: usize = 16;
+/// Biquads per speaker; an order-8 pass filter uses four of them.
+pub const MAX_PEQ: usize = 24;
 pub const MAX_BLOCK: usize = 1024;
 /// Total processing latency in samples (STFT + limiter lookahead).
 pub const LATENCY: usize = bands::LATENCY + limiter::LOOKAHEAD;
@@ -28,8 +29,9 @@ pub struct Config {
     pub widener: bool,
     pub width: f32,
     pub wide_hp: Coefs,
-    pub peq: [Coefs; MAX_PEQ],
-    pub peq_count: usize,
+    /// Speaker PEQ biquads per channel (left, right).
+    pub peq: [[Coefs; MAX_PEQ]; 2],
+    pub peq_count: [usize; 2],
     pub vb: VbConfig,
     pub bands: BandConfig,
     pub limiter: bool,
@@ -72,20 +74,28 @@ impl Config {
     /// volume is below 100%, keeping them referenced to the amplifier output.
     pub fn build(p: &Params, t: &Tuning, fs: f32, bypass: bool, hw_comp_db: f32) -> Config {
         let fsd = fs as f64;
-        let mut peq = [Coefs::IDENTITY; MAX_PEQ];
-        let mut peq_count = 0;
+        let mut peq = [[Coefs::IDENTITY; MAX_PEQ]; 2];
+        let mut peq_count = [0; 2];
         if p.peq.enable {
-            let mut push = |c: Coefs| {
-                if peq_count < MAX_PEQ {
-                    peq[peq_count] = c;
-                    peq_count += 1;
-                }
-            };
-            for f in p.peq.filters.iter().filter(|f| f.enabled) {
-                match (f.kind.as_str(), f.order) {
-                    ("highpass", 4) => BUTTER4_Q.iter().for_each(|&q| push(Coefs::highpass(fsd, f.f0 as f64, q))),
-                    ("highpass", _) => push(Coefs::highpass(fsd, f.f0 as f64, BUTTER2_Q)),
-                    _ => push(Coefs::peaking(fsd, f.f0 as f64, f.q as f64, f.gain_db as f64)),
+            let sides = [&p.peq.filters, p.peq.right.as_ref().unwrap_or(&p.peq.filters)];
+            for (ch, list) in sides.into_iter().enumerate() {
+                let mut push = |c: Coefs| {
+                    if peq_count[ch] < MAX_PEQ {
+                        peq[ch][peq_count[ch]] = c;
+                        peq_count[ch] += 1;
+                    }
+                };
+                for f in list.iter().filter(|f| f.enabled) {
+                    let (f0, q, g) = (f.f0 as f64, f.q as f64, f.gain_db as f64);
+                    match f.kind.as_str() {
+                        "highpass" => butterworth_qs(f.order).for_each(|q| push(Coefs::highpass(fsd, f0, q))),
+                        "lowpass" => butterworth_qs(f.order).for_each(|q| push(Coefs::lowpass(fsd, f0, q))),
+                        "notch" => push(Coefs::notch(fsd, f0, q)),
+                        "lowshelf" => push(Coefs::lowshelf(fsd, f0, q, g)),
+                        "highshelf" => push(Coefs::highshelf(fsd, f0, q, g)),
+                        "peak" => push(Coefs::peaking(fsd, f0, q, g)),
+                        _ => {}
+                    }
                 }
             }
         }
@@ -347,9 +357,9 @@ impl Engine {
     }
 
     pub fn set_config(&mut self, cfg: &Config) {
-        if cfg.peq_count > self.cfg.peq_count {
-            for ch in &mut self.peq {
-                for s in &mut ch[self.cfg.peq_count..cfg.peq_count] {
+        for ch in 0..2 {
+            if cfg.peq_count[ch] > self.cfg.peq_count[ch] {
+                for s in &mut self.peq[ch][self.cfg.peq_count[ch]..cfg.peq_count[ch]] {
                     s.reset();
                 }
             }
@@ -453,11 +463,12 @@ fn run_wet(
             r[i] = m - s;
         }
     }
-    for k in 0..cfg.peq_count {
-        let c = &cfg.peq[k];
-        for i in 0..n {
-            l[i] = peq[0][k].run(c, l[i]);
-            r[i] = peq[1][k].run(c, r[i]);
+    for (ch, buf) in [l.as_mut(), r.as_mut()].into_iter().enumerate() {
+        for k in 0..cfg.peq_count[ch] {
+            let c = &cfg.peq[ch][k];
+            for x in buf.iter_mut() {
+                *x = peq[ch][k].run(c, *x);
+            }
         }
     }
     if cfg.vb.enable {
@@ -479,8 +490,8 @@ fn run_wet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::{factory, PROFILES};
-    use crate::tuning::{parse, EMBEDDED_XML};
+    use crate::params::factory;
+    use crate::tuning::test_tuning;
 
     fn signal(n: usize) -> Vec<f32> {
         let mut seed = 1u32;
@@ -495,7 +506,7 @@ mod tests {
 
     #[test]
     fn audition_crossfade_is_smooth() {
-        let t = parse(EMBEDDED_XML).unwrap();
+        let t = test_tuning();
         let p = factory(&t, "off").unwrap();
         let mut a = PersonalEq::default();
         let mut b = PersonalEq::default();
@@ -521,7 +532,7 @@ mod tests {
 
     #[test]
     fn identical_sides_match_single_chain() {
-        let t = parse(EMBEDDED_XML).unwrap();
+        let t = test_tuning();
         let p = factory(&t, "music").unwrap();
         let mut eq = PersonalEq::default();
         eq.bands[1].gain_db = 4.0;
@@ -555,7 +566,7 @@ mod tests {
 
     #[test]
     fn bypass_is_bit_exact_delay() {
-        let t = parse(EMBEDDED_XML).unwrap();
+        let t = test_tuning();
         let p = factory(&t, "music").unwrap();
         let mut e = Engine::new(48000.0, &t, Config::build(&p, &t, 48000.0, true, 0.0));
         let x = signal(20000);
@@ -568,9 +579,9 @@ mod tests {
 
     #[test]
     fn all_profiles_finite_and_bounded() {
-        let t = parse(EMBEDDED_XML).unwrap();
-        for name in PROFILES {
-            let mut p = factory(&t, name).unwrap();
+        let t = test_tuning();
+        for name in t.profile_names() {
+            let mut p = factory(&t, &name).unwrap();
             p.vbass.enable = true;
             let mut e = Engine::new(48000.0, &t, Config::build(&p, &t, 48000.0, false, 0.0));
             let mut x = signal(48000);

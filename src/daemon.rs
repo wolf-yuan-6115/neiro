@@ -3,7 +3,7 @@
 use crate::clip::{self, Clip, Player};
 use crate::dsp::chain::{self, Config, Engine, PersonalCfg, SharedMeters};
 use crate::ipc::{self, Handler, Request, Response, StateView, TunerSource, TunerView};
-use crate::params::{self, factory, Params, PersonalEq, Saved, PERSONAL_PREFIX, PROFILES};
+use crate::params::{self, factory, Params, PersonalEq, Saved, PERSONAL_PREFIX};
 use crate::tuner::Tuner;
 use crate::pw::{self, RtState, RATE, SINK_NAME};
 use crate::system;
@@ -19,6 +19,8 @@ const SINK_KEY: &str = "default.configured.audio.sink";
 
 struct Inner {
     tuning: Tuning,
+    /// Profiles this tuning offers, in display order.
+    profiles: Vec<String>,
     saved: Saved,
     profile: String,
     bypass: bool,
@@ -107,7 +109,7 @@ impl Inner {
     fn view(&self) -> StateView {
         StateView {
             profile: self.profile.clone(),
-            profiles: PROFILES.iter().map(|s| s.to_string()).collect(),
+            profiles: self.profiles.clone(),
             bypass: self.bypass,
             dirty: *self.params() != self.baseline(&self.profile),
             customised: self.saved.overrides.contains_key(&self.profile),
@@ -180,8 +182,8 @@ impl Inner {
                 self.push();
             }
             Request::SetProfile { profile } => {
-                if !PROFILES.contains(&profile.as_str()) {
-                    return Err(anyhow!("unknown profile {profile}"));
+                if !self.profiles.contains(&profile) {
+                    return Err(anyhow!("this tuning has no profile named {profile} (has: {})", self.profiles.join(", ")));
                 }
                 self.profile = profile;
                 self.saved.profile = Some(self.profile.clone());
@@ -331,9 +333,10 @@ pub fn run(tuning_override: Option<std::path::PathBuf>) -> Result<()> {
         libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
     let saved = Saved::load();
-    let tuning_path = tuning_override.or_else(|| saved.tuning_path.clone().map(Into::into));
-    let tuning = tuning::load(tuning_path.as_deref())?;
-    let target = system::find_speaker()?;
+    let tuning_path = tuning::resolve(tuning_override.as_deref(), saved.tuning_path.as_deref())?;
+    let tuning = tuning::load(&tuning_path, saved.mode.as_deref())?;
+    eprintln!("neiro: tuning {} (mode {})", tuning_path.display(), tuning.mode);
+    let target = system::find_speaker(saved.speaker_sink.as_deref())?;
     eprintln!("neiro: target speaker sink {target}");
 
     // Recover from a previous crash before taking new snapshots.
@@ -345,12 +348,13 @@ pub fn run(tuning_override: Option<std::path::PathBuf>) -> Result<()> {
         let _ = std::fs::remove_file(restore_path());
     }
 
+    let profiles = tuning.profile_names();
     let mut working = BTreeMap::new();
-    for p in PROFILES {
+    for p in &profiles {
         let base = saved.overrides.get(p).cloned().map_or_else(|| factory(&tuning, p), Ok)?;
-        working.insert(p.to_string(), base);
+        working.insert(p.clone(), base);
     }
-    let profile = saved.profile.clone().filter(|p| PROFILES.contains(&p.as_str())).unwrap_or_else(|| "music".into());
+    let profile = saved.profile.clone().filter(|p| profiles.contains(p)).unwrap_or_else(|| tuning.initial_profile());
     let (tx, rx) = rtrb::RingBuffer::<Box<Config>>::new(64);
     let (back_tx, back) = rtrb::RingBuffer::<Box<Config>>::new(64);
     let meters = Arc::new(SharedMeters::default());
@@ -360,6 +364,7 @@ pub fn run(tuning_override: Option<std::path::PathBuf>) -> Result<()> {
     let inner = Inner {
         bypass: saved.bypass,
         tuning: tuning.clone(),
+        profiles,
         saved,
         profile,
         working,

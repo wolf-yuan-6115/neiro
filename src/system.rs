@@ -9,6 +9,7 @@ pub struct NodeInfo {
     pub id: u32,
     pub name: String,
     pub class: String,
+    pub description: String,
 }
 
 pub fn nodes() -> Result<Vec<NodeInfo>> {
@@ -23,6 +24,7 @@ pub fn nodes() -> Result<Vec<NodeInfo>> {
                         id: o.get("id")?.as_u64()? as u32,
                         name: props.get("node.name")?.as_str()?.to_string(),
                         class: props.get("media.class").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                        description: props.get("node.description").and_then(|c| c.as_str()).unwrap_or("").to_string(),
                     })
                 })
                 .collect()
@@ -34,13 +36,39 @@ pub fn node_id(name: &str) -> Option<u32> {
     nodes().ok()?.into_iter().find(|n| n.name == name).map(|n| n.id)
 }
 
-/// The built-in laptop speaker sink.
-pub fn find_speaker() -> Result<String> {
-    nodes()?
-        .into_iter()
-        .find(|n| n.class == "Audio/Sink" && n.name.starts_with("alsa_output") && n.name.contains("Speaker"))
-        .map(|n| n.name)
-        .ok_or_else(|| anyhow!("no internal speaker sink found (looked for an alsa_output *Speaker* sink)"))
+/// The built-in speaker sink: `preferred` if given (`speaker_sink` in
+/// state.toml), else an ALSA sink whose name or description says "speaker",
+/// else the only ALSA sink that isn't HDMI/DisplayPort, headphones or USB.
+pub fn find_speaker(preferred: Option<&str>) -> Result<String> {
+    let sinks: Vec<NodeInfo> =
+        nodes()?.into_iter().filter(|n| n.class == "Audio/Sink" && n.name.starts_with("alsa_output")).collect();
+    if let Some(p) = preferred {
+        return sinks
+            .iter()
+            .find(|n| n.name == p)
+            .map(|n| n.name.clone())
+            .ok_or_else(|| anyhow!("configured speaker_sink {p} not found"));
+    }
+    let is_speaker = |n: &NodeInfo| n.name.to_lowercase().contains("speaker") || n.description.to_lowercase().contains("speaker");
+    if let Some(n) = sinks.iter().find(|n| is_speaker(n)) {
+        return Ok(n.name.clone());
+    }
+    let other = |n: &&NodeInfo| {
+        let s = format!("{} {}", n.name, n.description).to_lowercase();
+        !["hdmi", "displayport", "headphone", "usb", "bluetooth", "bluez"].iter().any(|k| s.contains(k))
+    };
+    let candidates: Vec<&NodeInfo> = sinks.iter().filter(other).collect();
+    match candidates.as_slice() {
+        [one] => Ok(one.name.clone()),
+        _ => {
+            let list: Vec<String> = sinks.iter().map(|n| format!("  {}  ({})", n.name, n.description)).collect();
+            Err(anyhow!(
+                "couldn't tell which sink is the built-in speaker. Set speaker_sink in {} to one of:\n{}",
+                crate::params::state_path().display(),
+                list.join("\n")
+            ))
+        }
+    }
 }
 
 /// (volume, muted)
