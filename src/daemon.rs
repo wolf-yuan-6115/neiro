@@ -348,6 +348,8 @@ pub fn run(tuning_override: Option<std::path::PathBuf>) -> Result<()> {
         libc::sigaddset(&mut set, libc::SIGTERM);
         libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
+    // Before anything else: a second instance must not "recover" the running one's state.
+    ipc::ensure_no_daemon()?;
     let saved = Saved::load();
     let tuning_path = tuning::resolve(tuning_override.as_deref(), saved.tuning_path.as_deref())?;
     let tuning = tuning::load(&tuning_path, saved.mode.as_deref())?;

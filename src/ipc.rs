@@ -103,11 +103,18 @@ pub trait Handler: Send + Sync + 'static {
     fn handle(&self, req: Request) -> Response;
 }
 
-pub fn serve<H: Handler>(handler: std::sync::Arc<H>) -> Result<()> {
+/// Fails if a daemon already answers on the control socket.
+pub fn ensure_no_daemon() -> Result<()> {
     let path = socket_path();
     if UnixStream::connect(&path).is_ok() {
         return Err(anyhow!("another neiro daemon is already listening on {}", path.display()));
     }
+    Ok(())
+}
+
+pub fn serve<H: Handler>(handler: std::sync::Arc<H>) -> Result<()> {
+    ensure_no_daemon()?;
+    let path = socket_path();
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
     std::thread::spawn(move || {
