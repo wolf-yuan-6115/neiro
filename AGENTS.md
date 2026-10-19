@@ -34,8 +34,8 @@ Unit tests use `tests/fixtures/synthetic_dax3.xml` (`tuning::test_tuning()`), a 
 tuning with invented values that covers every schema variant neiro handles.
 
 The opt-in corpus test runs real tunings through discovery, the parser and the DSP. Point
-it at an unpacked driver package (the README's "Get your tuning" table says how to unpack
-each vendor's):
+it at an unpacked driver package (`docs/getting-your-tuning.md` says how to unpack each
+vendor's):
 `NEIRO_CORPUS=/path cargo test --release corpus -- --ignored --nocapture`.
 TUI tests render into ratatui's `TestBackend`. They record requests in `App::sent` instead of
 talking to a daemon.
