@@ -30,12 +30,21 @@ laptop's factory tuning as a PipeWire filter, with a terminal UI to control it.
 
 - Linux with PipeWire and WirePlumber
 - **A laptop that came with Dolby audio on Windows**, neiro does not generate tuning by itself.
-- Rust, clang and the PipeWire headers to build
+- Rust, clang and the PipeWire headers to build from source
 - ffmpeg (optional, for the A/B tuner)
 
 ## Getting started
 
 **1. Install neiro**
+
+On Arch Linux, install [`neiro-git`](https://aur.archlinux.org/packages/neiro-git) from
+the AUR:
+
+```sh
+paru -S neiro-git   # or yay -S neiro-git
+```
+
+Elsewhere, build it from source:
 
 ```sh
 cargo install --path .
@@ -57,6 +66,9 @@ download the driver and how to unpack it.
 ```sh
 neiro install
 ```
+
+The AUR package already ships the service, so there use
+`systemctl --user enable --now neiro.service` instead.
 
 To try it without the service, run `neiro daemon` in a terminal. Ctrl+C stops it and
 restores your audio.
