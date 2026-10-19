@@ -19,10 +19,14 @@ neiro             # TUI, in another terminal
 
 If the daemon isn't running, the TUI says so and can start it for you.
 
-The badge at the top left shows **● ON** or **BYPASS**. When Neiro DSP isn't your current
-output, it turns into a hollow **○ ON**, next to a chip that says why: **idle · output:
-<device>** when another device is playing, or **⚠ apps skip neiro** when the speaker itself
-is the default. Click the chip to switch back to Neiro DSP.
+The badge at the top left shows whether neiro is processing your sound:
+- **● ON**: sound plays through Neiro DSP.
+- **BYPASS**: processing is switched off (`space`).
+- **IDLE**: another device, such as headphones or a USB DAC, is your current output. The
+  bottom line names it.
+- **⚠ NOT IN USE**: the speaker itself is the default, so apps skip neiro.
+
+Click **IDLE** or **NOT IN USE** to switch back to Neiro DSP.
 
 ## TUI
 

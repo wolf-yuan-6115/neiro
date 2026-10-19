@@ -172,7 +172,7 @@ enum Hit {
     Keep(bool),
     /// The "speaker is the default" warning: true makes neiro the default, false dismisses.
     RouteFix(bool),
-    /// Header chip shown while Neiro DSP isn't the output; reopens the notice.
+    /// Header badge shown while Neiro DSP isn't the output; reopens the notice.
     RouteChip,
     Band(usize),
     Level(usize),
@@ -293,6 +293,8 @@ struct App {
 }
 
 const VU_FLOOR: f32 = -60.0;
+/// The IDLE badge: like BYPASS's grey, but bluish (xterm 256-colour 24, #005f87).
+const IDLE_BG: Color = Color::Indexed(24);
 /// How often to refresh the daemon state that isn't sent with our own requests.
 const STATE_POLL: Duration = Duration::from_millis(500);
 const HOLD_SECS: f32 = 1.0;
@@ -880,20 +882,18 @@ impl App {
         rb.text(" neiro ", Style::new());
         // Processing can be on while nothing plays through it: say where sound goes.
         let elsewhere = st.default_output.as_ref().filter(|o| o.0 != SINK_NAME);
-        if st.bypass {
-            rb.button(" BYPASS ", Style::new().bg(Color::DarkGray).fg(Color::White).bold(), Hit::Power);
-        } else if elsewhere.is_some() {
-            rb.button(" ○ ON ", Style::new().fg(Color::Green).bold(), Hit::Power);
-        } else {
-            rb.button(" ● ON ", Style::new().bg(Color::Green).fg(Color::Black).bold(), Hit::Power);
-        }
-        if let Some((name, desc)) = elsewhere {
-            if *name == st.target {
-                rb.button(" ⚠ apps skip neiro ", Style::new().fg(Color::Black).bg(Color::Yellow).bold(), Hit::RouteChip);
-            } else {
-                let short: String = desc.chars().take(28).collect();
-                let more = if desc.chars().count() > 28 { "…" } else { "" };
-                rb.button(format!(" idle · output: {short}{more} "), Style::new().fg(Color::Cyan), Hit::RouteChip);
+        match elsewhere {
+            _ if st.bypass => {
+                rb.button(" BYPASS ", Style::new().bg(Color::DarkGray).fg(Color::White).bold(), Hit::Power);
+            }
+            Some((name, _)) if *name == st.target => {
+                rb.button(" ⚠ NOT IN USE ", Style::new().bg(Color::Yellow).fg(Color::Black).bold(), Hit::RouteChip);
+            }
+            Some(_) => {
+                rb.button(" IDLE ", Style::new().bg(IDLE_BG).fg(Color::White).bold(), Hit::RouteChip);
+            }
+            None => {
+                rb.button(" ● ON ", Style::new().bg(Color::Green).fg(Color::Black).bold(), Hit::Power);
             }
         }
         if st.dirty {
@@ -918,12 +918,16 @@ impl App {
             .select(sel)
             .highlight_style(Style::new().fg(Color::Black).bg(Color::Cyan).bold())
             .block(Block::bordered().title(title).title_bottom(
-                Line::from(format!(
-                    " → {} · {} · +{:.1} ms ",
-                    st.target.trim_start_matches("alsa_output."),
-                    if st.pinned { "hw vol pinned".to_string() } else { format!("hw vol comp +{:.0} dB", st.hw_comp_db) },
-                    st.latency_ms
-                ))
+                Line::from(match elsewhere {
+                    // Another device plays: name it where the routing is described.
+                    Some((name, desc)) if *name != st.target => format!(" output: {desc} · +{:.1} ms ", st.latency_ms),
+                    _ => format!(
+                        " → {} · {} · +{:.1} ms ",
+                        st.target.trim_start_matches("alsa_output."),
+                        if st.pinned { "hw vol pinned".to_string() } else { format!("hw vol comp +{:.0} dB", st.hw_comp_db) },
+                        st.latency_ms
+                    ),
+                })
                 .right_aligned()
                 .dim(),
             ));
@@ -1526,7 +1530,7 @@ mod tests {
         set(&mut app, &neiro);
         let out = render(&mut app);
         assert!(!out.contains("Neiro DSP is not"), "no notice while neiro is the output");
-        assert!(out.contains("● ON") && !out.contains("idle ·"));
+        assert!(out.contains("● ON") && !out.contains("IDLE"));
 
         // The speaker itself: apps skip neiro by mistake.
         set(&mut app, &speaker);
@@ -1549,7 +1553,8 @@ mod tests {
         let out = render(&mut app);
         assert!(!out.contains("Neiro DSP is not"));
         // The header still says so, and clicking that reopens the notice.
-        assert!(out.contains("○ ON") && out.contains("idle · output: Pumper USB DAC Analog Stereo "), "{out}");
+        assert!(out.contains(" IDLE ") && !out.contains("● ON"), "{out}");
+        assert!(out.contains("output: Pumper USB DAC Analog Stereo · +22.3 ms"), "{out}");
         let chip = app.hits.iter().find(|(_, h)| matches!(h, Hit::RouteChip)).map(|(r, _)| *r).unwrap();
         app.click(Hit::RouteChip, chip, chip.x);
         assert!(render(&mut app).contains("Neiro DSP is not the output"));
@@ -1557,7 +1562,7 @@ mod tests {
         assert!(!render(&mut app).contains("Neiro DSP is not"));
         set(&mut app, &speaker);
         let out = render(&mut app);
-        assert!(!out.contains("neiro is not in use") && out.contains("⚠ apps skip neiro"));
+        assert!(!out.contains("neiro is not in use") && out.contains("⚠ NOT IN USE"));
         set(&mut app, &neiro);
         render(&mut app);
         set(&mut app, &dac);
