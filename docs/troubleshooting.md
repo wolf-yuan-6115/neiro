@@ -1,5 +1,27 @@
 # Troubleshooting
 
+## Logs
+
+The daemon logs at `info` level by default. As a service, its log is in the journal:
+
+```sh
+journalctl --user -u neiro            # everything
+journalctl --user -u neiro -p warning # warnings and errors only
+```
+
+For more detail, raise the level with `--log-level`, or `NEIRO_LOG` (which also takes
+per-module filters such as `info,neiro::system=trace`):
+
+```sh
+neiro daemon --log-level debug   # requests, routing decisions, stream states
+neiro daemon --log-level trace   # also every PipeWire tool call and TUI poll
+```
+
+For the service, run `systemctl --user edit neiro` and add `Environment=NEIRO_LOG=debug`
+under `[Service]`. The TUI never logs, because it draws on the terminal.
+
+## Common problems
+
 **"no speaker tuning"**
 Run `neiro import` first. See [Getting your tuning](getting-your-tuning.md).
 

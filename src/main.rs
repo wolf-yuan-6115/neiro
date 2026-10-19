@@ -4,6 +4,7 @@ mod clip;
 mod demo;
 mod dsp;
 mod ipc;
+mod logging;
 mod params;
 mod pw;
 mod samples;
@@ -22,6 +23,9 @@ use std::path::PathBuf;
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
+    /// Log level: error, warn, info, debug or trace; overrides NEIRO_LOG. Not used by the TUI.
+    #[arg(long, global = true, value_name = "LEVEL")]
+    log_level: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -107,8 +111,22 @@ impl TuningArgs {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.cmd.unwrap_or(Cmd::Tui) {
-        Cmd::Daemon { tuning } => daemon::run(tuning),
+    let cmd = cli.cmd.unwrap_or(Cmd::Tui);
+    match cmd {
+        // The TUI draws on the terminal; log lines would corrupt it.
+        Cmd::Tui => {}
+        Cmd::Daemon { .. } => logging::init(cli.log_level.as_deref(), "info"),
+        _ => logging::init(cli.log_level.as_deref(), "warn"),
+    }
+    match cmd {
+        Cmd::Daemon { tuning } => {
+            // Through the logger, so the journal records it as an error.
+            if let Err(e) = daemon::run(tuning) {
+                log::error!("{e:#}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Cmd::Tui => tui::run(),
         Cmd::Toggle { state } => {
             let on = state.map(|s| s == "off"); // "off" means effect off -> bypass on

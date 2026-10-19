@@ -119,6 +119,7 @@ pub fn serve<H: Handler>(handler: std::sync::Arc<H>) -> Result<()> {
     let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
     std::thread::spawn(move || {
         for conn in listener.incoming().flatten() {
+            log::trace!("control connection");
             let h = handler.clone();
             std::thread::spawn(move || {
                 let mut w = match conn.try_clone() {
@@ -129,7 +130,10 @@ pub fn serve<H: Handler>(handler: std::sync::Arc<H>) -> Result<()> {
                     let Ok(line) = line else { break };
                     let resp = match serde_json::from_str::<Request>(&line) {
                         Ok(req) => h.handle(req),
-                        Err(e) => Response { error: Some(format!("bad request: {e}")), ..Default::default() },
+                        Err(e) => {
+                            log::debug!("bad request {line:?}: {e}");
+                            Response { error: Some(format!("bad request: {e}")), ..Default::default() }
+                        }
                     };
                     let mut out = serde_json::to_string(&resp).unwrap_or_default();
                     out.push('\n');

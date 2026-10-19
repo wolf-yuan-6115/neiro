@@ -116,6 +116,8 @@ The matching rules follow the speaker-tuning-to-easyeffects project's findings.
 - `samples.rs` embeds the CC-BY excerpts in `samples/`. A test fails unless each one is credited in `samples/CREDITS.md`.
 - `demo.rs` has synthesized loops, used only when ffmpeg is missing.
 
+**Logging** (`logging.rs`) uses `log` + `env_logger`. The level comes from `--log-level`, else `NEIRO_LOG`, else `info` for the daemon and `warn` for CLI commands. Under systemd, stderr is the journal (`JOURNAL_STREAM`), so lines get `<N>` syslog priority prefixes and no timestamps. Never initialise logging for the TUI; use `log::` macros, not `eprintln!`, in code the daemon runs. `system::run` logs every PipeWire tool call at trace level.
+
 ## Packaging and CI
 
 `.gitlab-ci.yml` tests and builds on Debian 12 (`rust:1-bookworm`, glibc 2.36, PipeWire

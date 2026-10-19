@@ -382,7 +382,7 @@ fn migrate_old_config() {
             let _ = std::fs::create_dir_all(dir);
         }
         if std::fs::copy(&old, &new).is_ok() {
-            eprintln!("neiro: copied settings from {}", old.display());
+            log::info!("copied settings from {}", old.display());
         }
     }
 }

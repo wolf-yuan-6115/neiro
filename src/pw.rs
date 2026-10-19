@@ -139,6 +139,7 @@ pub fn run(
     let cap = capture.clone();
     let _pb_listener = playback
         .add_local_listener_with_user_data(())
+        .state_changed(|_, _, old, new| log::debug!("playback stream: {old:?} -> {new:?}"))
         .process(move |stream, _| {
             // Newest capture buffer wins; older ones are requeued as they drop.
             let mut inb = None;
@@ -204,6 +205,7 @@ pub fn run(
     let pb = playback.clone();
     let _cap_listener = capture
         .add_local_listener_with_user_data(())
+        .state_changed(|_, _, old, new| log::debug!("capture stream: {old:?} -> {new:?}"))
         .process(move |stream, _| {
             if pb.trigger_process().is_err() {
                 // Playback not ready: recycle our input so the graph keeps moving.

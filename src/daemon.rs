@@ -90,8 +90,9 @@ impl Inner {
         // Configs come back from the audio thread here so they are freed off the RT path.
         while self.back.pop().is_ok() {}
         let cfg = Box::new(self.config());
+        log::trace!("pushing config: profile {}, bypass {}, hw comp {:.1} dB", self.profile, self.bypass, self.hw_comp_db);
         if self.tx.push(cfg).is_err() {
-            eprintln!("neiro: config queue full, dropping update");
+            log::warn!("config queue full, dropping update");
         }
     }
 
@@ -105,7 +106,7 @@ impl Inner {
 
     fn persist(&self) {
         if let Err(e) = self.saved.store() {
-            eprintln!("neiro: saving state: {e:#}");
+            log::error!("saving state: {e:#}");
         }
     }
 
@@ -200,7 +201,10 @@ impl Inner {
                 self.persist();
                 self.push();
             }
-            Request::MakeDefault => self.want_default = true,
+            Request::MakeDefault => {
+                log::info!("asked to make {} the default output", pw::SINK_DESC);
+                self.want_default = true;
+            }
             Request::Save => {
                 let p = self.params().clone();
                 self.saved.overrides.insert(self.profile.clone(), p);
@@ -224,6 +228,13 @@ impl Controller {
     /// Records whether the speaker is the default; returns a pending make-default request.
     fn routing(&self, speaker_is_default: bool) -> bool {
         let mut i = self.0.lock().unwrap();
+        if speaker_is_default != i.speaker_is_default {
+            if speaker_is_default {
+                log::warn!("the speaker is the default output: apps bypass neiro");
+            } else {
+                log::info!("the speaker is no longer the default output");
+            }
+        }
         i.speaker_is_default = speaker_is_default;
         std::mem::take(&mut i.want_default)
     }
@@ -232,6 +243,7 @@ impl Controller {
         let mut i = self.0.lock().unwrap();
         i.pinned = pinned;
         if (i.hw_comp_db - comp_db).abs() > 0.05 {
+            log::debug!("speaker volume compensation {:.1} dB -> {comp_db:.1} dB", i.hw_comp_db);
             i.hw_comp_db = comp_db;
             i.push();
         }
@@ -294,11 +306,19 @@ impl Controller {
 
 impl Handler for Controller {
     fn handle(&self, req: Request) -> Response {
+        match &req {
+            // The TUI polls these several times a second.
+            Request::Meters | Request::GetState => log::trace!("request {req:?}"),
+            _ => log::debug!("request {req:?}"),
+        }
         let res = match req {
             Request::TunerStart { source } => self.start_tuner(source),
             req => self.0.lock().unwrap().handle(req),
         };
-        res.unwrap_or_else(|e| Response { error: Some(format!("{e:#}")), ..Default::default() })
+        res.unwrap_or_else(|e| {
+            log::debug!("request failed: {e:#}");
+            Response { error: Some(format!("{e:#}")), ..Default::default() }
+        })
     }
 }
 
@@ -353,14 +373,14 @@ pub fn run(tuning_override: Option<std::path::PathBuf>) -> Result<()> {
     let saved = Saved::load();
     let tuning_path = tuning::resolve(tuning_override.as_deref(), saved.tuning_path.as_deref())?;
     let tuning = tuning::load(&tuning_path, saved.mode.as_deref())?;
-    eprintln!("neiro: tuning {} (mode {})", tuning_path.display(), tuning.mode);
+    log::info!("tuning {} (mode {})", tuning_path.display(), tuning.mode);
     let target = system::find_speaker(saved.speaker_sink.as_deref())?;
-    eprintln!("neiro: target speaker sink {target}");
+    log::info!("speaker sink {target}");
 
     // Recover from a previous crash before taking new snapshots.
     if let Ok(s) = std::fs::read_to_string(restore_path()) {
         if let Ok(r) = serde_json::from_str::<Restore>(&s) {
-            eprintln!("neiro: restoring state left by a previous run");
+            log::warn!("restoring state left by a previous run");
             apply_restore(&r, &target);
         }
         let _ = std::fs::remove_file(restore_path());
@@ -441,7 +461,7 @@ pub fn run(tuning_override: Option<std::path::PathBuf>) -> Result<()> {
         std::thread::sleep(Duration::from_millis(250));
     };
     let res = pw::run(rt, &target, on_started, on_quit);
-    eprintln!("neiro: shut down");
+    log::info!("shut down");
     // Normally already done (and emptied) in on_quit; this covers an early exit.
     apply_restore(&restore.lock().unwrap(), &target);
     let _ = std::fs::remove_file(restore_path());
@@ -463,7 +483,9 @@ fn become_default(target: &str, sink_id: u32, spk_id: u32, r: &mut Restore) {
     }
     let prev = system::get_default(SINK_KEY);
     let json = |n: &str| serde_json::json!({ "name": n }).to_string();
-    let _ = system::set_default(SINK_KEY, Some(&json(SINK_NAME)));
+    if let Err(e) = system::set_default(SINK_KEY, Some(&json(SINK_NAME))) {
+        log::warn!("making {SINK_NAME} the default: {e:#}");
+    }
     let prev_name = prev.as_deref().and_then(|p| {
         serde_json::from_str::<serde_json::Value>(p).ok()?.get("name")?.as_str().map(String::from)
     });
@@ -473,18 +495,23 @@ fn become_default(target: &str, sink_id: u32, spk_id: u32, r: &mut Restore) {
         // the configured slot, so that device still takes over when it returns,
         // as it does without neiro.
         Some(chosen) if chosen != target && chosen != SINK_NAME => {
+            log::info!("standing in for the speaker; {chosen} stays the configured default");
             let mut pushes = system::history_pushes(&system::default_sink_history(), target, SINK_NAME);
             if pushes.last() != Some(&chosen) {
                 pushes.push(chosen);
             }
+            log::debug!("re-selecting {pushes:?} to restore their order in WirePlumber's history");
             for n in &pushes {
-                let _ = system::set_default(SINK_KEY, Some(&json(n)));
+                if let Err(e) = system::set_default(SINK_KEY, Some(&json(n))) {
+                    log::warn!("selecting {n}: {e:#}");
+                }
             }
             std::thread::sleep(Duration::from_millis(300));
             if system::default_name("default.audio.sink").as_deref() == Some(SINK_NAME) {
                 r.stand_in = true;
             } else {
                 // History restore is off in WirePlumber: hold the configured slot.
+                log::info!("WirePlumber didn't pick {SINK_NAME} from its history; making it the configured default");
                 r.default_sink.get_or_insert(prev);
                 let _ = system::set_default(SINK_KEY, Some(&json(SINK_NAME)));
             }
@@ -494,6 +521,7 @@ fn become_default(target: &str, sink_id: u32, spk_id: u32, r: &mut Restore) {
             r.default_sink.get_or_insert(None);
         }
         _ => {
+            log::info!("{SINK_NAME} is now the configured default (was {})", prev.as_deref().unwrap_or("unset"));
             r.default_sink.get_or_insert(prev);
         }
     }
@@ -512,7 +540,7 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
         std::thread::sleep(Duration::from_millis(100));
     }
     let Some(sink_id) = sink_id else {
-        eprintln!("neiro: virtual sink did not appear");
+        log::error!("virtual sink did not appear");
         return;
     };
     let Some(spk_id) = system::node_id(target) else { return };
@@ -522,9 +550,10 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
         let mut r = restore.lock().unwrap();
         become_default(target, sink_id, spk_id, &mut r);
     }
-    eprintln!("neiro: running (sink {SINK_NAME} id {sink_id})");
+    log::info!("running (sink {SINK_NAME} id {sink_id})");
 
     let mut out_id = None;
+    let mut last_eff = None;
     loop {
         std::thread::sleep(Duration::from_secs(1));
         // Shutdown owns the volumes from here; re-pinning now would undo the restore.
@@ -535,6 +564,10 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
             out_id = system::node_id("output.neiro");
         }
         let eff = system::default_name("default.audio.sink");
+        if eff != last_eff {
+            log::info!("default output: {}", eff.as_deref().unwrap_or("none"));
+            last_eff = eff.clone();
+        }
         let speaker_default = eff.as_deref() == Some(target);
         if ctl.routing(speaker_default) && speaker_default {
             become_default(target, sink_id, spk_id, &mut restore.lock().unwrap());
@@ -548,13 +581,14 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
             if let Some((v, m)) = r.speaker_volume.take() {
                 let _ = system::set_volume(spk_id, v);
                 let _ = system::set_mute(spk_id, m);
-                eprintln!("neiro: another stream uses the speaker directly, unpinned volume");
+                log::info!("another stream uses the speaker directly, unpinned volume");
             }
             save_restore(&r);
         } else if !pinned && !foreign && hw_volume > 0.0 {
             // Volume and mute now live on the virtual sink; the amp runs at the calibrated level.
             if let Some((v, m)) = system::get_volume(spk_id) {
                 if (v - hw_volume).abs() > 1e-3 || m {
+                    log::info!("pinning the speaker at {:.0}% (was {:.0}%{})", hw_volume * 100.0, v * 100.0, if m { ", muted" } else { "" });
                     r.speaker_volume = Some((v, m));
                     save_restore(&r);
                     let _ = system::set_volume(spk_id, hw_volume);
@@ -571,7 +605,7 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
         let pinned = r.speaker_volume.is_some();
         drop(r);
         if let Some((v, _)) = system::get_volume(spk_id) {
-            ctl.set_hw(-system::volume_db(v), pinned);
+            ctl.set_hw(0.0 - system::volume_db(v), pinned); // not -x: 100% would read -0.0
         }
     }
 }

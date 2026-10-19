@@ -2,7 +2,18 @@
 //! and hardware-volume handling. These run outside the audio path only.
 
 use anyhow::{anyhow, Context, Result};
-use std::process::Command;
+use std::process::{Command, Output};
+
+/// Runs a PipeWire tool, logging the command at trace level and any failure with its stderr.
+fn run(cmd: &mut Command) -> Result<Output> {
+    let line = format!("{} {}", cmd.get_program().to_string_lossy(), cmd.get_args().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "));
+    log::trace!("running {line}");
+    let out = cmd.output().with_context(|| format!("running {line}"))?;
+    if !out.status.success() {
+        log::debug!("{line} failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(out)
+}
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -13,7 +24,7 @@ pub struct NodeInfo {
 }
 
 pub fn nodes() -> Result<Vec<NodeInfo>> {
-    let out = Command::new("pw-dump").output().context("running pw-dump")?;
+    let out = run(&mut Command::new("pw-dump"))?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     Ok(v.as_array()
         .map(|a| {
@@ -73,22 +84,22 @@ pub fn find_speaker(preferred: Option<&str>) -> Result<String> {
 
 /// (volume, muted)
 pub fn get_volume(id: u32) -> Option<(f32, bool)> {
-    let out = Command::new("wpctl").args(["get-volume", &id.to_string()]).output().ok()?;
+    let out = run(Command::new("wpctl").args(["get-volume", &id.to_string()])).ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     Some((s.split_whitespace().nth(1)?.parse().ok()?, s.contains("[MUTED]")))
 }
 
 pub fn set_mute(id: u32, muted: bool) -> Result<()> {
-    let st = Command::new("wpctl").args(["set-mute", &id.to_string(), if muted { "1" } else { "0" }]).status()?;
-    if !st.success() {
+    let out = run(Command::new("wpctl").args(["set-mute", &id.to_string(), if muted { "1" } else { "0" }]))?;
+    if !out.status.success() {
         return Err(anyhow!("wpctl set-mute failed"));
     }
     Ok(())
 }
 
 pub fn set_volume(id: u32, v: f32) -> Result<()> {
-    let st = Command::new("wpctl").args(["set-volume", &id.to_string(), &format!("{v:.4}")]).status()?;
-    if !st.success() {
+    let out = run(Command::new("wpctl").args(["set-volume", &id.to_string(), &format!("{v:.4}")]))?;
+    if !out.status.success() {
         return Err(anyhow!("wpctl set-volume failed"));
     }
     Ok(())
@@ -96,7 +107,7 @@ pub fn set_volume(id: u32, v: f32) -> Result<()> {
 
 /// Raw JSON value of a key in the "default" metadata, e.g. `{"name":"alsa_output..."}`.
 pub fn get_default(key: &str) -> Option<String> {
-    let out = Command::new("pw-metadata").args(["-n", "default", "0", key]).output().ok()?;
+    let out = run(Command::new("pw-metadata").args(["-n", "default", "0", key])).ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     let line = s.lines().find(|l| l.contains(&format!("key:'{key}'")))?;
     let start = line.find("value:'")? + 7;
@@ -116,7 +127,7 @@ pub fn set_default(key: &str, json: Option<&str>) -> Result<()> {
         Some(v) => c.args(["0", key, v, "Spa:String:JSON"]),
         None => c.args(["-d", "0", key]),
     };
-    let st = c.output()?;
+    let st = run(&mut c)?;
     if !st.status.success() {
         return Err(anyhow!("pw-metadata failed"));
     }
@@ -125,7 +136,7 @@ pub fn set_default(key: &str, json: Option<&str>) -> Result<()> {
 
 /// All links as (output node id, input node id).
 pub fn links() -> Result<Vec<(u32, u32)>> {
-    let out = Command::new("pw-dump").output().context("running pw-dump")?;
+    let out = run(&mut Command::new("pw-dump"))?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     Ok(v.as_array()
         .map(|a| {

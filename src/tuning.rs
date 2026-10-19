@@ -410,10 +410,7 @@ pub fn load(path: &Path, mode: Option<&str>) -> Result<Tuning> {
     let t = parse(&std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?, mode)
         .with_context(|| format!("parsing {}", path.display()))?;
     if t.channels > 2 {
-        eprintln!(
-            "neiro: this tuning describes {} speakers; neiro processes the first two (left/right) for now",
-            t.channels
-        );
+        log::warn!("this tuning describes {} speakers; neiro processes the first two (left/right) for now", t.channels);
     }
     Ok(t)
 }
