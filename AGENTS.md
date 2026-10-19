@@ -84,7 +84,7 @@ parameter descriptors.
 The matching rules follow the speaker-tuning-to-easyeffects project's findings.
 
 **Daemon system integration** (`daemon.rs`, `system.rs`) shells out to `pw-dump`, `wpctl` and `pw-metadata`:
-- The speaker sink is `speaker_sink` from `state.toml` if set. Otherwise `system::find_speaker` takes the ALSA sink whose name or description says "speaker", or the only non-HDMI/USB/headphone sink.
+- The speaker sink is `speaker_sink` from `state.toml` if set. Otherwise `system::find_speaker` considers only built-in ALSA sinks (never USB, HDMI/DisplayPort, headphone or Bluetooth, even when one is the default). It takes the one whose name or description says "speaker", or the only one left.
 - At start, if the speaker (or neiro) is the default sink, `become_default` makes `neiro_sink` the default and copies the speaker's volume and mute onto it:
   - If the configured default is another, absent device (a USB DAC, Bluetooth), neiro leaves it configured. It re-selects the sinks above the speaker in WirePlumber's history (`~/.local/state/wireplumber/default-nodes`), so `neiro_sink` lands just above the speaker. That device still wins when it returns (`Restore::stand_in`).
   - Otherwise it takes the configured slot and restores it on exit.

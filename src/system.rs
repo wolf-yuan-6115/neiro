@@ -48,11 +48,16 @@ pub fn node_id(name: &str) -> Option<u32> {
 }
 
 /// The built-in speaker sink: `preferred` if given (`speaker_sink` in
-/// state.toml), else an ALSA sink whose name or description says "speaker",
-/// else the only ALSA sink that isn't HDMI/DisplayPort, headphones or USB.
+/// state.toml), else a built-in ALSA sink whose name or description says
+/// "speaker", else the only built-in ALSA sink. USB, HDMI/DisplayPort and
+/// headphone sinks never count as built-in, whatever the default output is.
 pub fn find_speaker(preferred: Option<&str>) -> Result<String> {
-    let sinks: Vec<NodeInfo> =
-        nodes()?.into_iter().filter(|n| n.class == "Audio/Sink" && n.name.starts_with("alsa_output")).collect();
+    pick_speaker(&nodes()?, preferred)
+}
+
+fn pick_speaker(nodes: &[NodeInfo], preferred: Option<&str>) -> Result<String> {
+    let sinks: Vec<&NodeInfo> =
+        nodes.iter().filter(|n| n.class == "Audio/Sink" && n.name.starts_with("alsa_output")).collect();
     if let Some(p) = preferred {
         return sinks
             .iter()
@@ -60,15 +65,15 @@ pub fn find_speaker(preferred: Option<&str>) -> Result<String> {
             .map(|n| n.name.clone())
             .ok_or_else(|| anyhow!("configured speaker_sink {p} not found"));
     }
-    let is_speaker = |n: &NodeInfo| n.name.to_lowercase().contains("speaker") || n.description.to_lowercase().contains("speaker");
-    if let Some(n) = sinks.iter().find(|n| is_speaker(n)) {
-        return Ok(n.name.clone());
-    }
-    let other = |n: &&NodeInfo| {
+    let built_in = |n: &&&NodeInfo| {
         let s = format!("{} {}", n.name, n.description).to_lowercase();
         !["hdmi", "displayport", "headphone", "usb", "bluetooth", "bluez"].iter().any(|k| s.contains(k))
     };
-    let candidates: Vec<&NodeInfo> = sinks.iter().filter(other).collect();
+    let candidates: Vec<&&NodeInfo> = sinks.iter().filter(built_in).collect();
+    let is_speaker = |n: &&&NodeInfo| n.name.to_lowercase().contains("speaker") || n.description.to_lowercase().contains("speaker");
+    if let Some(n) = candidates.iter().find(|n| is_speaker(n)) {
+        return Ok(n.name.clone());
+    }
     match candidates.as_slice() {
         [one] => Ok(one.name.clone()),
         _ => {
@@ -198,6 +203,33 @@ pub fn history_pushes(history: &[String], speaker: &str, ours: &str) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaker_is_never_an_external_device() {
+        let sink = |id, name: &str, description: &str| NodeInfo {
+            id,
+            name: name.into(),
+            class: "Audio/Sink".into(),
+            description: description.into(),
+        };
+        // An external USB speaker listed before the built-in one, while it's the default.
+        let nodes = [
+            sink(30, "alsa_output.usb-Acer_ASK130_USB_Speaker_12345678custom-00.analog-stereo", "ASK130 USB Speaker Analog Stereo"),
+            sink(40, "alsa_output.pci-0000_00_1f.3-platform-sof_sdw.HiFi__Headphones__sink", "Headphones"),
+            sink(47, "alsa_output.pci-0000_00_1f.3-platform-sof_sdw.HiFi__Speaker__sink", "Speaker"),
+            sink(60, "bluez_output.B8_7B_D4_12_0F_95.1", "Bluetooth Speaker"),
+        ];
+        assert_eq!(pick_speaker(&nodes, None).unwrap(), nodes[2].name);
+        // HDA: one analog sink for speaker and jack, next to a USB DAC.
+        let hda = [
+            sink(30, "alsa_output.usb-LightWolf_Pumper_USB_DAC-00.analog-stereo", "Pumper USB DAC Analog Stereo"),
+            sink(50, "alsa_output.pci-0000_00_1f.3.analog-stereo", "Built-in Audio Analog Stereo"),
+            sink(51, "alsa_output.pci-0000_00_1f.3.hdmi-stereo", "Built-in Audio Digital Stereo (HDMI)"),
+        ];
+        assert_eq!(pick_speaker(&hda, None).unwrap(), hda[1].name);
+        // Nothing built-in: ask instead of guessing an external device.
+        assert!(pick_speaker(&nodes[..1], None).is_err());
+    }
 
     #[test]
     fn sink_history_order() {
