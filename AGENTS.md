@@ -112,6 +112,24 @@ The matching rules follow the speaker-tuning-to-easyeffects project's findings.
 - `samples.rs` embeds the CC-BY excerpts in `samples/`. A test fails unless each one is credited in `samples/CREDITS.md`.
 - `demo.rs` has synthesized loops, used only when ffmpeg is missing.
 
+## Packaging and CI
+
+`.gitlab-ci.yml` tests and builds on Debian 12 (`rust:1-bookworm`, glibc 2.36, PipeWire
+0.3.65 headers). Every pipeline produces three artifacts:
+- a binary tarball;
+- a `.deb`, via `cargo deb`;
+- an `.rpm`, via `cargo generate-rpm`.
+
+Both package tools read their metadata from `Cargo.toml`. A `v<version>` tag that matches
+`Cargo.toml` also uploads the artifacts to the package registry and creates a release. The
+systemd user unit lives in `packaging/neiro.service`.
+
+- **Old PipeWire headers:** the code must compile against PipeWire 0.3.65. Use numeric
+  values for newer constants; see `PW_STREAM_FLAG_ASYNC` in `pw.rs`.
+- **Package names:** neiro calls `pw-dump`/`pw-metadata`/`pw-play` and `wpctl` at runtime.
+  Those come from `pipewire-bin` + `wireplumber` on Debian, `pipewire-utils` +
+  `wireplumber` on Fedora, and `pipewire` + `pipewire-audio` + `wireplumber` on Arch.
+
 ## Live-testing cautions
 
 Running the daemon changes the user's default sink and speaker volume. Use Ctrl+C or SIGTERM (by

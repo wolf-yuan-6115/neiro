@@ -5,6 +5,50 @@ edition = "2024"
 description = "Laptop speaker enhancement for PipeWire, using the laptop's own Dolby DAX3 tuning"
 authors = ["Wolf Yuan <me@wolf-yuan.dev>"]
 license = "GPL-3.0-or-later"
+homepage = "https://gitlab.com/wolf-yuan/neiro"
+repository = "https://gitlab.com/wolf-yuan/neiro"
+readme = "README.md"
+
+# `cargo deb`: Debian/Ubuntu package. Library dependencies come from the
+# binary ($auto); the rest are the PipeWire tools neiro calls at runtime.
+[package.metadata.deb]
+maintainer = "Wolf Yuan <me@wolf-yuan.dev>"
+copyright = "2026 Wolf Yuan <me@wolf-yuan.dev>"
+license-file = ["LICENSE", "0"]
+section = "sound"
+priority = "optional"
+extended-description = """\
+neiro runs a laptop's own Dolby DAX3 speaker tuning, taken from its Windows \
+audio driver, as a PipeWire filter, with a terminal UI to control it and a \
+blind A/B test for a personal EQ."""
+depends = "$auto, pipewire-bin, wireplumber"
+recommends = "ffmpeg"
+suggests = "7zip, innoextract, msitools, unzip"
+assets = [
+    ["target/release/neiro", "usr/bin/", "755"],
+    ["packaging/neiro.service", "usr/lib/systemd/user/", "644"],
+    ["README.md", "usr/share/doc/neiro/", "644"],
+    ["docs/*.md", "usr/share/doc/neiro/docs/", "644"],
+]
+
+# `cargo generate-rpm`: Fedora/openSUSE package. The libpipewire requirement is
+# found from the binary; the rest are the PipeWire tools neiro calls at runtime.
+[package.metadata.generate-rpm]
+summary = "Laptop speaker enhancement for PipeWire, using the laptop's own Dolby DAX3 tuning"
+assets = [
+    { source = "target/release/neiro", dest = "/usr/bin/neiro", mode = "755" },
+    { source = "packaging/neiro.service", dest = "/usr/lib/systemd/user/neiro.service", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/neiro/README.md", mode = "644", doc = true },
+    { source = "docs/*.md", dest = "/usr/share/doc/neiro/docs/", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/neiro/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+pipewire-utils = "*"
+wireplumber = "*"
+
+[package.metadata.generate-rpm.recommends]
+"/usr/bin/ffmpeg" = "*"
 
 [dependencies]
 anyhow = "1.0.104"

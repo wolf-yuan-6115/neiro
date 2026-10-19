@@ -1,0 +1,143 @@
+# Tests neiro and builds x86_64 Linux artifacts: a prebuilt binary tarball, a
+# .deb (Debian/Ubuntu) and an .rpm (Fedora/openSUSE). Every pipeline keeps them
+# as job artifacts; pushing a tag `v<version>` (matching Cargo.toml) also
+# uploads them to the package registry and creates a GitLab release.
+
+stages:
+  - test
+  - build
+  - package
+  - release
+
+variables:
+  CARGO_HOME: ${CI_PROJECT_DIR}/.cargo-home
+  CARGO_TERM_COLOR: always
+  # Debian 12 (glibc 2.36): binaries built here also run on newer distros.
+  RUST_IMAGE: docker.io/library/rust:1-bookworm
+  CARGO_DEB_VERSION: "3.8.0"
+  CARGO_GENERATE_RPM_VERSION: "0.21.1"
+  PACKAGE_REGISTRY: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/neiro
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+.rust:
+  image: ${RUST_IMAGE}
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends clang libpipewire-0.3-dev pkg-config > /dev/null
+  cache:
+    key:
+      files: [Cargo.lock]
+    paths:
+      - .cargo-home/bin/
+      - .cargo-home/registry/index/
+      - .cargo-home/registry/cache/
+      - .cargo-home/git/db/
+
+test:
+  extends: .rust
+  stage: test
+  script:
+    # The sample and clip tests decode audio with ffmpeg.
+    - apt-get install -y -qq --no-install-recommends ffmpeg > /dev/null
+    - cargo test --locked
+
+build:
+  extends: .rust
+  stage: build
+  script:
+    - VERSION=$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"name":"neiro","version":"\([^"]*\)".*/\1/p')
+    - |
+      if [ -n "$CI_COMMIT_TAG" ] && [ "$CI_COMMIT_TAG" != "v$VERSION" ]; then
+        echo "Tag $CI_COMMIT_TAG doesn't match Cargo.toml version $VERSION"; exit 1
+      fi
+    - cargo build --locked --release
+    - NAME="neiro-${VERSION}-x86_64-linux-gnu"
+    - mkdir -p "dist/$NAME/docs"
+    - cp target/release/neiro LICENSE README.md packaging/neiro.service "dist/$NAME/"
+    - cp docs/*.md "dist/$NAME/docs/"
+    - tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+    - rm -r "dist/$NAME"
+    - echo "VERSION=$VERSION" > build.env
+  artifacts:
+    paths:
+      - dist/
+      - target/release/neiro
+    reports:
+      dotenv: build.env
+    expire_in: 1 week
+
+deb:
+  extends: .rust
+  stage: package
+  needs: [build]
+  script:
+    - cargo install --locked "cargo-deb@${CARGO_DEB_VERSION}"
+    - cargo deb --no-build --locked --output dist/
+  artifacts:
+    paths:
+      - dist/*.deb
+    expire_in: 1 week
+
+rpm:
+  extends: .rust
+  stage: package
+  needs: [build]
+  script:
+    - cargo install --locked "cargo-generate-rpm@${CARGO_GENERATE_RPM_VERSION}"
+    - cargo generate-rpm --output dist/
+  artifacts:
+    paths:
+      - dist/*.rpm
+    expire_in: 1 week
+
+upload:
+  stage: release
+  image: docker.io/curlimages/curl:latest
+  needs: [build, deb, rpm]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d/
+  script:
+    - |
+      for f in dist/*; do
+        curl --fail --silent --show-error --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file "$f" "${PACKAGE_REGISTRY}/${VERSION}/$(basename "$f")"
+      done
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/cli:latest
+  needs: [build, upload]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d/
+  script:
+    - echo "Creating release $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: neiro $VERSION
+    description: |
+      neiro $VERSION for x86_64 Linux.
+
+      - **Prebuilt binary:** `neiro-$VERSION-x86_64-linux-gnu.tar.gz` (glibc 2.36 or newer)
+      - **Debian / Ubuntu:** `neiro_$VERSION-1_amd64.deb`
+      - **Fedora / openSUSE:** `neiro-$VERSION-1.x86_64.rpm`
+
+      After installing, run `neiro import` to install your laptop's tuning,
+      then `systemctl --user enable --now neiro.service`.
+    assets:
+      links:
+        - name: neiro-$VERSION-x86_64-linux-gnu.tar.gz
+          url: ${PACKAGE_REGISTRY}/$VERSION/neiro-$VERSION-x86_64-linux-gnu.tar.gz
+          link_type: package
+        - name: neiro_$VERSION-1_amd64.deb
+          url: ${PACKAGE_REGISTRY}/$VERSION/neiro_$VERSION-1_amd64.deb
+          link_type: package
+        - name: neiro-$VERSION-1.x86_64.rpm
+          url: ${PACKAGE_REGISTRY}/$VERSION/neiro-$VERSION-1.x86_64.rpm
+          link_type: package
