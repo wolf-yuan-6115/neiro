@@ -4,10 +4,12 @@ Guidance for AI coding agents working in this repository.
 
 ## What this is
 
-neiro (音色) is a Rust speaker-enhancement DSP for the ASUS Zenbook S14 on PipeWire. It is
-a single binary: a daemon that runs the audio node, and a ratatui TUI and CLI that control it.
-The DSP reproduces the laptop's Windows factory tuning (`tuning.xml`, a Dolby DAX3 file
-embedded with `include_str!`). It adds a personal EQ and a blind A/B tuner on top.
+neiro (音色) is a Rust laptop-speaker DSP for PipeWire. It is a single binary: a daemon
+that runs the audio node, and a ratatui TUI and CLI that control it. The DSP reproduces the
+laptop's Windows factory tuning: the Dolby DAX3 XML from its audio driver, installed at
+runtime to `~/.config/neiro/tuning.xml` by `neiro import`. It is never embedded or committed.
+A personal EQ and a blind A/B tuner sit on top. It was developed on an ASUS Zenbook S14,
+but nothing in the code is model-specific.
 
 ## Commands
 
@@ -21,12 +23,20 @@ cargo test --release <name> -- --nocapture   # see printed renders/measurements
 ./target/release/neiro                # TUI (default subcommand)
 ./target/release/neiro status | toggle [on|off] | profile <name>
 ./target/release/neiro render in.wav out.wav --profile music [--vbass] [--saved] [--stats]   # offline, 48 kHz only
-./target/release/neiro dump-tuning    # parsed profiles as Params
+./target/release/neiro import <xml|dir|windows-mount> [--list]   # match + install this machine's tuning
+./target/release/neiro dump-tuning [--tuning F] [--mode M]   # modes, profiles, parsed Params
 ./target/release/neiro segment <file> # hidden: which 10 s the tuner would pick
 ./target/release/neiro install        # writes and enables ~/.config/systemd/user/neiro.service
 ```
 
 Some tests need `ffmpeg` on PATH, because the bundled samples and the clip tests decode Opus.
+Unit tests use `tests/fixtures/synthetic_dax3.xml` (`tuning::test_tuning()`), a hand-made
+tuning with invented values that covers every schema variant neiro handles.
+
+The opt-in corpus test runs real tunings through discovery, the parser and the DSP. Point
+it at an unpacked driver package (the README's "Get your tuning" table says how to unpack
+each vendor's):
+`NEIRO_CORPUS=/path cargo test --release corpus -- --ignored --nocapture`.
 TUI tests render into ratatui's `TestBackend`. They record requests in `App::sent` instead of
 talking to a daemon.
 
@@ -38,7 +48,10 @@ They speak newline-delimited JSON over `$XDG_RUNTIME_DIR/neiro.sock` (`ipc.rs`: 
 parameter descriptors.
 
 **Parameter pipeline** (the data flow across modules):
-1. `tuning.rs` parses `tuning.xml` into `Profile`s. Most values are 1/16 dB fixed point, converted to dB here.
+1. `tuning.rs` parses a DAX3 tuning into `Profile`s for one `internal_speaker` operating mode.
+   - Most values are 1/16 dB fixed point, converted to dB here.
+   - Elements may be missing, use `value=`, `preset=` or per-channel `<ch_00>` forms, and speaker PEQ is per speaker (left/right). Everything falls back to neutral defaults.
+   - `Tuning::profile_names()` puts the canonical profiles first and always includes `off`, synthesised by `params::factory` when the file has none.
 2. `params.rs`: `Params::from_profile` gives the factory defaults per profile.
    - User edits are full per-profile overrides in `Saved` (`~/.config/neiro/state.toml`).
    - The global `PersonalEq` also lives in `Saved`.
@@ -62,7 +75,15 @@ parameter descriptors.
 - Interpretation guesses for the undocumented Dolby fields are in code comments and the README: MB compressor field order, regulator knee = `threshold_high - threshold_low`, timbre preservation.
 - IEQ removes the spectral tilt from both content and target before comparing (`bands::ieq_correction`).
 
+**Tuning discovery** (`discover.rs`, `neiro import`):
+- `MachineIds::detect` reads SoundWire (manufacturer, part) from `/sys/bus/soundwire/devices`, the audio controller's PCI subsystem (classes `0x0401`/`0x0403`), and HD-Audio codecs from `/proc/asound/card*/codec#*`.
+- `parse_name` decodes the DAX3 file-name conventions. It skips the `_settings`/`_dmic`/`_amic` companions.
+- `rank` orders candidates: exact match, then subsystem-only (warned), then `tuning_version`.
+
+The matching rules follow the speaker-tuning-to-easyeffects project's findings.
+
 **Daemon system integration** (`daemon.rs`, `system.rs`) shells out to `pw-dump`, `wpctl` and `pw-metadata`:
+- The speaker sink is `speaker_sink` from `state.toml` if set. Otherwise `system::find_speaker` takes the ALSA sink whose name or description says "speaker", or the only non-HDMI/USB/headphone sink.
 - At start, if the speaker (or neiro) is the default sink, it makes `neiro_sink` the default and copies the speaker's volume and mute onto it.
 - A 1 s monitor loop pins the hardware speaker to 100% **only while nothing but `output.neiro` feeds it**. It unpins immediately otherwise.
 - The regulator thresholds are always offset by the real speaker volume (`hw_comp_db`).
@@ -99,8 +120,8 @@ PID) to stop it so it restores them, and confirm the speaker volume afterwards.
   pattern: it kills the shell.
 - For TUI-only experiments, set `XDG_RUNTIME_DIR` to an empty directory so it can't reach a
   real daemon.
-- `tuning.xml` is ASUS/Dolby material. It's fine in a private repo, but don't publish it.
-  `--tuning` / `tuning_path` can load it at runtime instead.
+- Never commit vendor tuning XMLs or a corpus of them; they are third-party data. Only the
+  synthetic fixture belongs in the repo.
 
 ## Conventions
 

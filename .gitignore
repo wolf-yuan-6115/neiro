@@ -1,1 +1,4 @@
 /target
+# Vendor tuning data never belongs in the repo (installed to ~/.config/neiro by `neiro import`).
+/tuning.xml
+/*.xml
