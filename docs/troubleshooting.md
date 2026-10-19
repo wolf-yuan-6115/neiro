@@ -13,6 +13,10 @@ Set `speaker_sink` in `~/.config/neiro/state.toml` to one of the names it lists.
 **Default output, volume or mute left wrong after a crash**
 Start the daemon again. It restores what the crashed run changed before taking over.
 
+**"neiro is not in use" in the TUI**
+Apps are playing straight to the speaker. Press `d` to make Neiro DSP the default; your
+other devices keep their priority. `Esc` hides the warning until it happens again.
+
 **No sound through Neiro DSP**
 - Check that its volume isn't muted or very low in your mixer.
 - Run `neiro status`.

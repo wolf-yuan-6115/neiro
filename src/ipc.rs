@@ -38,6 +38,8 @@ pub enum Request {
     TunerFinish,
     /// Leave the session, keeping the result as the personal EQ or discarding it.
     TunerStop { keep: bool },
+    /// Make the Neiro DSP sink the default output (when the speaker is).
+    MakeDefault,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +87,9 @@ pub struct StateView {
     pub personal: PersonalEq,
     #[serde(default)]
     pub tuner: Option<TunerView>,
+    /// The hardware speaker itself is the default output, so apps bypass neiro.
+    #[serde(default)]
+    pub speaker_is_default: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -85,7 +85,10 @@ The matching rules follow the speaker-tuning-to-easyeffects project's findings.
 
 **Daemon system integration** (`daemon.rs`, `system.rs`) shells out to `pw-dump`, `wpctl` and `pw-metadata`:
 - The speaker sink is `speaker_sink` from `state.toml` if set. Otherwise `system::find_speaker` takes the ALSA sink whose name or description says "speaker", or the only non-HDMI/USB/headphone sink.
-- At start, if the speaker (or neiro) is the default sink, it makes `neiro_sink` the default and copies the speaker's volume and mute onto it.
+- At start, if the speaker (or neiro) is the default sink, `become_default` makes `neiro_sink` the default and copies the speaker's volume and mute onto it:
+  - If the configured default is another, absent device (a USB DAC, Bluetooth), neiro leaves it configured. It re-selects the sinks above the speaker in WirePlumber's history (`~/.local/state/wireplumber/default-nodes`), so `neiro_sink` lands just above the speaker. That device still wins when it returns (`Restore::stand_in`).
+  - Otherwise it takes the configured slot and restores it on exit.
+- While the speaker itself is the effective default, `StateView::speaker_is_default` makes the TUI warn; `Request::MakeDefault` runs `become_default` from the monitor thread.
 - A 1 s monitor loop pins the hardware speaker to 100% **only while nothing but `output.neiro` feeds it**. It unpins immediately otherwise.
 - The regulator thresholds are always offset by the real speaker volume (`hw_comp_db`).
 - Restore info is mirrored to `$XDG_RUNTIME_DIR/neiro.restore.json` for crash recovery on the next start.

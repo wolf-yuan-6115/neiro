@@ -32,6 +32,9 @@ struct Inner {
     hw_comp_db: f32,
     pinned: bool,
     session: Option<Session>,
+    speaker_is_default: bool,
+    /// A client asked to make neiro the default; the monitor thread acts on it.
+    want_default: bool,
 }
 
 /// A running blind A/B tuner session.
@@ -122,6 +125,7 @@ impl Inner {
             pinned: self.pinned,
             personal: self.saved.personal.clone(),
             tuner: self.session.as_ref().map(Session::view),
+            speaker_is_default: self.speaker_is_default,
         }
     }
 
@@ -196,6 +200,7 @@ impl Inner {
                 self.persist();
                 self.push();
             }
+            Request::MakeDefault => self.want_default = true,
             Request::Save => {
                 let p = self.params().clone();
                 self.saved.overrides.insert(self.profile.clone(), p);
@@ -216,6 +221,13 @@ impl Inner {
 pub struct Controller(Mutex<Inner>);
 
 impl Controller {
+    /// Records whether the speaker is the default; returns a pending make-default request.
+    fn routing(&self, speaker_is_default: bool) -> bool {
+        let mut i = self.0.lock().unwrap();
+        i.speaker_is_default = speaker_is_default;
+        std::mem::take(&mut i.want_default)
+    }
+
     fn set_hw(&self, comp_db: f32, pinned: bool) {
         let mut i = self.0.lock().unwrap();
         i.pinned = pinned;
@@ -379,6 +391,8 @@ pub fn run(tuning_override: Option<std::path::PathBuf>) -> Result<()> {
         hw_comp_db: initial_comp,
         pinned: false,
         session: None,
+        speaker_is_default: false,
+        want_default: false,
     };
     let engine = Engine::new(RATE as f32, &tuning, inner.config());
     let controller = Arc::new(Controller(Mutex::new(inner)));
@@ -437,6 +451,53 @@ fn save_restore(r: &Restore) {
     let _ = std::fs::write(restore_path(), serde_json::to_string(r).unwrap_or_default());
 }
 
+/// Makes the virtual sink the default in place of the speaker, carrying over the
+/// speaker's volume and mute. Call only while the speaker (or neiro) is the default.
+fn become_default(target: &str, sink_id: u32, spk_id: u32, r: &mut Restore) {
+    // While pinned, the speaker reads 100%; the user's level is the saved one.
+    if let Some((v, m)) = r.speaker_volume.or_else(|| system::get_volume(spk_id)) {
+        let _ = system::set_volume(sink_id, v);
+        let _ = system::set_mute(sink_id, m);
+    }
+    let prev = system::get_default(SINK_KEY);
+    let json = |n: &str| serde_json::json!({ "name": n }).to_string();
+    let _ = system::set_default(SINK_KEY, Some(&json(SINK_NAME)));
+    let prev_name = prev.as_deref().and_then(|p| {
+        serde_json::from_str::<serde_json::Value>(p).ok()?.get("name")?.as_str().map(String::from)
+    });
+    match prev_name {
+        // The user chose a device that isn't plugged in (else it would be the
+        // default). Take the speaker's place in WirePlumber's history instead of
+        // the configured slot, so that device still takes over when it returns,
+        // as it does without neiro.
+        Some(chosen) if chosen != target && chosen != SINK_NAME => {
+            let mut pushes = system::history_pushes(&system::default_sink_history(), target, SINK_NAME);
+            if pushes.last() != Some(&chosen) {
+                pushes.push(chosen);
+            }
+            for n in &pushes {
+                let _ = system::set_default(SINK_KEY, Some(&json(n)));
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            if system::default_name("default.audio.sink").as_deref() == Some(SINK_NAME) {
+                r.stand_in = true;
+            } else {
+                // History restore is off in WirePlumber: hold the configured slot.
+                r.default_sink.get_or_insert(prev);
+                let _ = system::set_default(SINK_KEY, Some(&json(SINK_NAME)));
+            }
+        }
+        // Our own sink was configured (a stale entry): on exit, let WirePlumber choose.
+        Some(n) if n == SINK_NAME => {
+            r.default_sink.get_or_insert(None);
+        }
+        _ => {
+            r.default_sink.get_or_insert(prev);
+        }
+    }
+    save_restore(r);
+}
+
 /// Makes the virtual sink the default (if the speaker was), then keeps the
 /// hardware speaker volume pinned only while nothing but neiro feeds it.
 fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Controller, stopping: &AtomicBool) {
@@ -456,42 +517,8 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
     // WirePlumber may already have promoted our new sink to the effective default.
     let eff = system::default_name("default.audio.sink");
     if eff.as_deref() == Some(target) || eff.as_deref() == Some(SINK_NAME) {
-        if let Some((v, m)) = system::get_volume(spk_id) {
-            let _ = system::set_volume(sink_id, v);
-            let _ = system::set_mute(sink_id, m);
-        }
         let mut r = restore.lock().unwrap();
-        let prev = system::get_default(SINK_KEY);
-        let json = |n: &str| serde_json::json!({ "name": n }).to_string();
-        let _ = system::set_default(SINK_KEY, Some(&json(SINK_NAME)));
-        let prev_name = prev.as_deref().and_then(|p| {
-            serde_json::from_str::<serde_json::Value>(p).ok()?.get("name")?.as_str().map(String::from)
-        });
-        match prev_name {
-            // The user chose a device that isn't plugged in (else it would be the
-            // default). Take the speaker's place in WirePlumber's history instead of
-            // the configured slot, so that device still takes over when it returns,
-            // as it does without neiro.
-            Some(chosen) if chosen != target && chosen != SINK_NAME => {
-                let mut pushes = system::history_pushes(&system::default_sink_history(), target, SINK_NAME);
-                if pushes.last() != Some(&chosen) {
-                    pushes.push(chosen);
-                }
-                for n in &pushes {
-                    let _ = system::set_default(SINK_KEY, Some(&json(n)));
-                }
-                std::thread::sleep(Duration::from_millis(300));
-                if system::default_name("default.audio.sink").as_deref() == Some(SINK_NAME) {
-                    r.stand_in = true;
-                } else {
-                    // History restore is off in WirePlumber: hold the configured slot.
-                    r.default_sink = Some(prev);
-                    let _ = system::set_default(SINK_KEY, Some(&json(SINK_NAME)));
-                }
-            }
-            _ => r.default_sink = Some(prev),
-        }
-        save_restore(&r);
+        become_default(target, sink_id, spk_id, &mut r);
     }
     eprintln!("neiro: running (sink {SINK_NAME} id {sink_id})");
 
@@ -504,6 +531,11 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
         }
         if out_id.is_none() {
             out_id = system::node_id("output.neiro");
+        }
+        let eff = system::default_name("default.audio.sink");
+        let speaker_default = eff.as_deref() == Some(target);
+        if ctl.routing(speaker_default) && speaker_default {
+            become_default(target, sink_id, spk_id, &mut restore.lock().unwrap());
         }
         let Ok(links) = system::links() else { continue };
         let foreign = links.iter().any(|&(o, i)| i == spk_id && Some(o) != out_id);

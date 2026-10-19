@@ -9,6 +9,16 @@ never processed.
 Your volume is applied *before* the processing, as on Windows. That way the
 speaker-protection stages see the level that actually reaches the amplifier.
 
+## Other outputs
+
+neiro takes the speaker's place in WirePlumber's list of your preferred outputs. It doesn't
+jump to the top. A device you prefer, such as a USB DAC or Bluetooth headphones, still takes
+over when you plug it in, and sound comes back through neiro when you unplug it. That's the
+same as without neiro, with Neiro DSP in place of the speaker.
+
+If the speaker itself becomes the default, apps skip neiro, and the TUI offers to fix it.
+This can happen when neiro started while another device was in use.
+
 ## Speaker volume
 
 While nothing else plays directly to the speaker, neiro holds the hardware speaker at 100%
