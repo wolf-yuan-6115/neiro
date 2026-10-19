@@ -11,6 +11,7 @@ use crate::tuning::{self, Tuning};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -380,24 +381,43 @@ pub fn run(tuning_override: Option<std::path::PathBuf>) -> Result<()> {
     });
 
     let restore = Arc::new(Mutex::new(Restore::default()));
+    let stopping = Arc::new(AtomicBool::new(false));
+    let faded = Arc::new(AtomicBool::new(false));
     let r2 = restore.clone();
     let t2 = target.clone();
+    let s2 = stopping.clone();
     let on_started = move || {
-        std::thread::spawn(move || monitor(&t2, hw_volume, &r2, &controller));
+        std::thread::spawn(move || monitor(&t2, hw_volume, &r2, &controller, &s2));
     };
 
-    let rt = RtState::new(engine, rx, back_tx, meters);
+    let rt = RtState::new(engine, rx, back_tx, meters, stopping.clone(), faded.clone());
     let r3 = restore.clone();
-    // Runs after the main loop stops but before our sink disappears.
+    let t3 = target.clone();
+    // Runs after the main loop stops but while our nodes still exist. Order matters to
+    // avoid a pop or a burst at full volume:
+    //   1. fade our output to silence (the real-time thread keeps running),
+    //   2. give the speaker back its volume and mute while nothing plays through it,
+    //   3. restore the default sink so apps move onto an already-quieted speaker,
+    //   4. only then let pw::run disconnect.
     let on_quit = move || {
-        if let Some(id) = system::node_id(SINK_NAME) {
-            if let Some(st) = system::get_volume(id) {
-                r3.lock().unwrap().sink_state = Some(st);
-            }
+        stopping.store(true, Ordering::Relaxed);
+        let t0 = Instant::now();
+        // If nothing is playing the graph may be idle and never call us; don't wait long.
+        while !faded.load(Ordering::Acquire) && t0.elapsed() < Duration::from_millis(300) {
+            std::thread::sleep(Duration::from_millis(5));
         }
+        let mut r = std::mem::take(&mut *r3.lock().unwrap());
+        if let Some(st) = system::node_id(SINK_NAME).and_then(system::get_volume) {
+            r.sink_state = Some(st);
+        }
+        apply_restore(&r, &t3);
+        let _ = std::fs::remove_file(restore_path());
+        // Let WirePlumber move the streams before our (silent) sink goes away.
+        std::thread::sleep(Duration::from_millis(250));
     };
     let res = pw::run(rt, &target, on_started, on_quit);
-    eprintln!("neiro: shutting down");
+    eprintln!("neiro: shut down");
+    // Normally already done (and emptied) in on_quit; this covers an early exit.
     apply_restore(&restore.lock().unwrap(), &target);
     let _ = std::fs::remove_file(restore_path());
     let _ = std::fs::remove_file(ipc::socket_path());
@@ -410,7 +430,7 @@ fn save_restore(r: &Restore) {
 
 /// Makes the virtual sink the default (if the speaker was), then keeps the
 /// hardware speaker volume pinned only while nothing but neiro feeds it.
-fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Controller) {
+fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Controller, stopping: &AtomicBool) {
     let mut sink_id = None;
     for _ in 0..50 {
         sink_id = system::node_id(SINK_NAME);
@@ -441,6 +461,10 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
     let mut out_id = None;
     loop {
         std::thread::sleep(Duration::from_secs(1));
+        // Shutdown owns the volumes from here; re-pinning now would undo the restore.
+        if stopping.load(Ordering::Relaxed) {
+            return;
+        }
         if out_id.is_none() {
             out_id = system::node_id("output.neiro");
         }

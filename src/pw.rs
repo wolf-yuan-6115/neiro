@@ -10,6 +10,7 @@ use pw::properties::properties;
 use pw::spa;
 use pw::stream::{StreamFlags, StreamRc};
 use spa::pod::Pod;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub const SINK_NAME: &str = "neiro_sink";
@@ -26,7 +27,15 @@ pub struct RtState {
     r: Vec<f32>,
     ol: Vec<f32>,
     or: Vec<f32>,
+    /// Set by the daemon on shutdown: ramp the output to silence.
+    stopping: Arc<AtomicBool>,
+    /// Set here once the output has reached silence.
+    faded: Arc<AtomicBool>,
+    gain: f32,
 }
+
+/// Shutdown fade length; long enough to avoid a click, short enough to feel instant.
+const FADE_MS: f32 = 50.0;
 
 impl RtState {
     pub fn new(
@@ -34,6 +43,8 @@ impl RtState {
         rx: rtrb::Consumer<Box<Config>>,
         back: rtrb::Producer<Box<Config>>,
         meters: Arc<SharedMeters>,
+        stopping: Arc<AtomicBool>,
+        faded: Arc<AtomicBool>,
     ) -> RtState {
         RtState {
             engine,
@@ -44,6 +55,9 @@ impl RtState {
             r: vec![0.0; MAX_FRAMES],
             ol: vec![0.0; MAX_FRAMES],
             or: vec![0.0; MAX_FRAMES],
+            stopping,
+            faded,
+            gain: 1.0,
         }
     }
 }
@@ -164,6 +178,18 @@ pub fn run(
             n = n.min(bytes.len() / 8);
             st.engine.process(&st.l[..n], &st.r[..n], &mut st.ol[..n], &mut st.or[..n]);
             st.meters.store(&st.engine.meters, &st.engine.peaks);
+            if st.stopping.load(Ordering::Relaxed) {
+                // Ramp to silence so disconnecting doesn't cut the waveform mid-cycle.
+                let step = 1.0 / (FADE_MS * 1e-3 * RATE as f32);
+                for i in 0..n {
+                    st.gain = (st.gain - step).max(0.0);
+                    st.ol[i] *= st.gain;
+                    st.or[i] *= st.gain;
+                }
+                if st.gain == 0.0 {
+                    st.faded.store(true, Ordering::Release);
+                }
+            }
             for i in 0..n {
                 bytes[i * 8..i * 8 + 4].copy_from_slice(&st.ol[i].to_le_bytes());
                 bytes[i * 8 + 4..i * 8 + 8].copy_from_slice(&st.or[i].to_le_bytes());
