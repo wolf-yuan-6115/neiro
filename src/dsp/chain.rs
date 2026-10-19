@@ -114,11 +114,11 @@ impl Config {
         };
 
         let mut b = BandConfig::default();
-        let volmax = if p.volmax.enable { p.volmax.boost_db } else { 0.0 };
+        b.volmax_db = if p.volmax.enable { p.volmax.boost_db } else { 0.0 };
         for i in 0..NBANDS {
             let (ol, or) = if p.optimizer.enable { (p.optimizer.left[i], p.optimizer.right[i]) } else { (0.0, 0.0) };
-            b.static_db[0][i] = ol + volmax;
-            b.static_db[1][i] = or + volmax;
+            b.static_db[0][i] = ol;
+            b.static_db[1][i] = or;
         }
         b.ieq_enable = p.ieq.enable;
         if let Some(curve) = t.ieq_curves.get(&p.ieq.curve) {

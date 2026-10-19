@@ -1,4 +1,4 @@
-//! 20-band STFT processor: static EQ (audio optimizer + volmax), adaptive IEQ,
+//! 20-band STFT processor: static EQ (audio optimizer), adaptive IEQ, volmax,
 //! multiband compressor and the per-band regulator, all applied as smooth
 //! per-bin gains in one WOLA filterbank (sqrt-Hann, N=1024, hop=256).
 
@@ -27,8 +27,13 @@ pub struct MbcGroupCfg {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BandConfig {
-    /// Static per-channel gains (optimizer + volmax) in dB.
+    /// Static per-channel gains (audio optimizer) in dB, seen by the dynamics.
     pub static_db: [[f32; NBANDS]; 2],
+    /// Volmax boost in dB, applied *after* the compressor and regulator: Dolby
+    /// limits at the decoded threshold and then adds the boost (measured on
+    /// Windows by speaker-tuning-to-easyeffects), so the boost must not push
+    /// the bands into limiting earlier.
+    pub volmax_db: f32,
     pub ieq_enable: bool,
     pub ieq_target: [f32; NBANDS],
     /// 0..1
@@ -51,6 +56,7 @@ impl Default for BandConfig {
     fn default() -> Self {
         BandConfig {
             static_db: [[0.0; NBANDS]; 2],
+            volmax_db: 0.0,
             ieq_enable: false,
             ieq_target: [0.0; NBANDS],
             ieq_amount: 0.0,
@@ -351,7 +357,7 @@ impl BandProcessor {
         for c in 0..2 {
             let mut total = [0f32; NBANDS];
             for b in 0..NBANDS {
-                total[b] = cfg.static_db[c][b] + ieq[b] + mbc_db[b] + reg_db[b];
+                total[b] = cfg.static_db[c][b] + ieq[b] + mbc_db[b] + reg_db[b] + cfg.volmax_db;
             }
             for (k, &(b0, b1, fr)) in self.bin_interp.iter().enumerate() {
                 let db = total[b0] + (total[b1] - total[b0]) * fr;
@@ -451,6 +457,27 @@ mod tests {
         }
         // The bump is pulled down relative to its neighbours.
         assert!(ca[3] < ca[2] - 3.0 && ca[3] < ca[4] - 3.0);
+    }
+
+    #[test]
+    fn volmax_is_applied_after_the_regulator() {
+        // A loud 3 kHz tone in a band limited at -20 dB, with +6 dB volmax:
+        // limit to the threshold first, then boost (as Dolby does on Windows).
+        let mut cfg = BandConfig::default();
+        cfg.reg_enable = true;
+        cfg.reg_knee = 0.0;
+        cfg.reg_threshold = [0.0; NBANDS];
+        cfg.reg_threshold[11] = -20.0;
+        cfg.volmax_db = 6.0;
+        let mut p = BandProcessor::new(48000.0, &freqs());
+        p.set_config(&cfg);
+        let g = sine_gain(&mut p, 3000.0, 0.5); // -6 dBFS in
+        assert!((g - (-20.0 + 6.0 - (-6.0))).abs() < 1.0, "net gain {g} dB, want about -8");
+        // Below every threshold, volmax is a plain boost.
+        let mut p = BandProcessor::new(48000.0, &freqs());
+        p.set_config(&cfg);
+        let g = sine_gain(&mut p, 3000.0, 0.01);
+        assert!((g - 6.0).abs() < 0.5, "quiet tone gain {g}");
     }
 
     #[test]
