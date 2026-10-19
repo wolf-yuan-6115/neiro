@@ -8,7 +8,9 @@ use super::vbass::{VbConfig, VirtualBass};
 use crate::params::{Params, PersonalEq, PE_BANDS};
 use crate::tuning::{Tuning, NBANDS};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Biquads per speaker; an order-8 pass filter uses four of them.
 pub const MAX_PEQ: usize = 24;
@@ -230,14 +232,27 @@ pub struct SharedMeters {
     vals: Vec<AtomicU32>,
     /// Linear peaks, max-accumulated until a reader takes them.
     peaks: [AtomicU32; 4],
+    /// Bumped by every store.
+    seq: AtomicU64,
+    /// Reader side only: the last `seq` seen and when it changed.
+    seen: Mutex<(u64, Instant)>,
 }
+
+/// With nothing playing into it, PipeWire pauses neiro's streams and the audio
+/// thread stops storing: meters older than this read as silence, not frozen.
+const METERS_STALE: Duration = Duration::from_millis(250);
 
 impl Default for SharedMeters {
     fn default() -> Self {
-        SharedMeters {
+        let m = SharedMeters {
             vals: (0..NBANDS * 3 + 2 + 4).map(|_| AtomicU32::new(0)).collect(),
             peaks: Default::default(),
-        }
+            seq: AtomicU64::new(0),
+            seen: Mutex::new((0, Instant::now())),
+        };
+        // Start at silence: all-zero bits would read as 0 dBFS until audio runs.
+        m.store(&MeterSnapshot::default(), &[0.0; 4]);
+        m
     }
 }
 
@@ -253,9 +268,24 @@ impl SharedMeters {
         for (slot, p) in self.peaks.iter().zip(peaks) {
             slot.fetch_max(p.abs().to_bits(), Ordering::Relaxed);
         }
+        self.seq.fetch_add(1, Ordering::Release);
     }
 
     pub fn load(&self) -> MeterSnapshot {
+        let seq = self.seq.load(Ordering::Acquire);
+        let stale = {
+            let mut seen = self.seen.lock().unwrap();
+            if seen.0 != seq {
+                *seen = (seq, Instant::now());
+            }
+            seen.1.elapsed() > METERS_STALE
+        };
+        if stale {
+            for slot in &self.peaks {
+                slot.store(0, Ordering::Relaxed);
+            }
+            return MeterSnapshot::default();
+        }
         let v: Vec<f32> = self.vals.iter().map(|a| f32::from_bits(a.load(Ordering::Relaxed))).collect();
         let mut m = MeterSnapshot::default();
         m.gr_db.copy_from_slice(&v[0..NBANDS]);
@@ -504,6 +534,23 @@ fn run_wet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meters_read_silence_until_audio_runs_and_after_it_stops() {
+        let m = SharedMeters::default();
+        let fresh = m.load();
+        assert_eq!(fresh.vu_db, [-120.0; 4], "a new meter must not read 0 dBFS");
+        assert!(fresh.level_db.iter().all(|&l| l <= -120.0));
+        let mut snap = MeterSnapshot::default();
+        snap.vu_db = [-12.0; 4];
+        m.store(&snap, &[0.5; 4]);
+        let live = m.load();
+        assert_eq!(live.vu_db, [-12.0; 4]);
+        assert!((live.peak_db[0] - -6.02).abs() < 0.01);
+        // The stream paused: no stores, so the meters fall to silence.
+        std::thread::sleep(METERS_STALE + Duration::from_millis(50));
+        assert_eq!(m.load().vu_db, [-120.0; 4]);
+    }
     use crate::params::factory;
     use crate::tuning::test_tuning;
 
