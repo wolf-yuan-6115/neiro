@@ -144,3 +144,65 @@ pub fn links() -> Result<Vec<(u32, u32)>> {
 pub fn volume_db(v: f32) -> f32 {
     60.0 * v.max(1e-4).log10()
 }
+
+/// WirePlumber's stack of previously chosen default sinks, most recent first
+/// (`node.restore-default-targets`). With the configured default absent,
+/// WirePlumber picks the first available entry, so the order is the user's
+/// device preference. Empty if the state file can't be read.
+pub fn default_sink_history() -> Vec<String> {
+    let Some(path) = dirs::state_dir().map(|d| d.join("wireplumber").join("default-nodes")) else { return vec![] };
+    std::fs::read_to_string(path).map(|s| parse_sink_history(&s)).unwrap_or_default()
+}
+
+fn parse_sink_history(state: &str) -> Vec<String> {
+    const KEY: &str = "default.configured.audio.sink";
+    let mut entries: Vec<(i64, String)> = state
+        .lines()
+        .filter_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            let idx = match k.strip_prefix(KEY)? {
+                "" => -1,
+                rest => rest.strip_prefix('.')?.parse().ok()?,
+            };
+            Some((idx, v.trim().to_string()))
+        })
+        .collect();
+    entries.sort();
+    entries.into_iter().map(|(_, v)| v).collect()
+}
+
+/// The sinks to re-select, in order, after selecting `ours`, so that `ours`
+/// lands just above `speaker` in the history and everything the user ranked
+/// above the speaker stays above it. Each selection moves a name to the top.
+pub fn history_pushes(history: &[String], speaker: &str, ours: &str) -> Vec<String> {
+    const MAX: usize = 16;
+    let above: Vec<&String> = history.iter().take_while(|n| n.as_str() != speaker).filter(|n| n.as_str() != ours).collect();
+    if above.len() > MAX || !history.iter().any(|n| n == speaker) {
+        // Speaker not ranked (or buried): keep just the user's own choice on top.
+        return history.iter().filter(|n| n.as_str() != ours).take(1).cloned().collect();
+    }
+    above.into_iter().rev().cloned().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sink_history_order() {
+        let state = "[default-nodes]\n\
+            default.configured.audio.sink.1=bt\n\
+            default.configured.audio.sink=dac\n\
+            default.configured.audio.source=mic\n\
+            default.configured.audio.sink.0=neiro_sink\n\
+            default.configured.audio.sink.2=speaker\n\
+            default.configured.audio.sink.3=headphones\n";
+        let h = parse_sink_history(state);
+        assert_eq!(h, ["dac", "neiro_sink", "bt", "speaker", "headphones"]);
+        // Select neiro, then bt, then dac: history becomes dac, bt, neiro, speaker.
+        assert_eq!(history_pushes(&h, "speaker", "neiro_sink"), ["bt", "dac"]);
+        let none: Vec<String> = vec![];
+        assert_eq!(history_pushes(&["speaker".into()], "speaker", "neiro_sink"), none);
+        assert_eq!(history_pushes(&["dac".into(), "x".into()], "speaker", "neiro_sink"), ["dac"]);
+    }
+}

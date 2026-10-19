@@ -297,6 +297,10 @@ struct Restore {
     speaker_volume: Option<(f32, bool)>,
     /// Some(previous value) if we replaced the configured default sink; inner None = key was unset.
     default_sink: Option<Option<String>>,
+    /// We became the default through WirePlumber's history, standing in for the
+    /// speaker, while the configured default stayed the user's (absent) device.
+    #[serde(default)]
+    stand_in: bool,
     /// Last seen (volume, muted) of the virtual sink, handed back to the speaker on exit.
     sink_state: Option<(f32, bool)>,
 }
@@ -308,7 +312,7 @@ fn restore_path() -> std::path::PathBuf {
 fn apply_restore(r: &Restore, target: &str) {
     // If we were the default, the speaker takes over the volume/mute the user last
     // set on the virtual sink; otherwise just undo our pinning.
-    let took_over = r.default_sink.is_some();
+    let took_over = r.default_sink.is_some() || r.stand_in;
     let state = if took_over { r.sink_state.or(r.speaker_volume) } else { r.speaker_volume };
     if let (Some((v, m)), Some(id)) = (state, system::node_id(target)) {
         let _ = system::set_volume(id, v);
@@ -457,8 +461,36 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
             let _ = system::set_mute(sink_id, m);
         }
         let mut r = restore.lock().unwrap();
-        r.default_sink = Some(system::get_default(SINK_KEY));
-        let _ = system::set_default(SINK_KEY, Some(&format!("{{\"name\":\"{SINK_NAME}\"}}")));
+        let prev = system::get_default(SINK_KEY);
+        let json = |n: &str| serde_json::json!({ "name": n }).to_string();
+        let _ = system::set_default(SINK_KEY, Some(&json(SINK_NAME)));
+        let prev_name = prev.as_deref().and_then(|p| {
+            serde_json::from_str::<serde_json::Value>(p).ok()?.get("name")?.as_str().map(String::from)
+        });
+        match prev_name {
+            // The user chose a device that isn't plugged in (else it would be the
+            // default). Take the speaker's place in WirePlumber's history instead of
+            // the configured slot, so that device still takes over when it returns,
+            // as it does without neiro.
+            Some(chosen) if chosen != target && chosen != SINK_NAME => {
+                let mut pushes = system::history_pushes(&system::default_sink_history(), target, SINK_NAME);
+                if pushes.last() != Some(&chosen) {
+                    pushes.push(chosen);
+                }
+                for n in &pushes {
+                    let _ = system::set_default(SINK_KEY, Some(&json(n)));
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                if system::default_name("default.audio.sink").as_deref() == Some(SINK_NAME) {
+                    r.stand_in = true;
+                } else {
+                    // History restore is off in WirePlumber: hold the configured slot.
+                    r.default_sink = Some(prev);
+                    let _ = system::set_default(SINK_KEY, Some(&json(SINK_NAME)));
+                }
+            }
+            _ => r.default_sink = Some(prev),
+        }
         save_restore(&r);
     }
     eprintln!("neiro: running (sink {SINK_NAME} id {sink_id})");
