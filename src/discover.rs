@@ -3,8 +3,12 @@
 //!
 //! Tuning files are named after the hardware they bind to:
 //! - HD Audio: `[HDAUDIO_|INTELAUDIO_|PCI_|AUCD_]DEV_<codec>_SUBSYS_<subsystem>[_PCI_SUBSYS_…].xml`
-//! - SoundWire: `SOUNDWIRE_[SDCAFUNCTION_NN_]MAN_<man>_FUNC_<func>_SUBSYS_<device><vendor>.xml`
-//!   (or `SDW_…`), where SUBSYS is the audio controller's PCI subsystem.
+//! - SoundWire: `SOUNDWIRE_[SDCAFUNCTION_NN_]MAN_<man>_FUNC_<func>_SUBSYS_<device><vendor>.xml`,
+//!   where SUBSYS is the audio controller's PCI subsystem.
+//! - Controller-bound: `SDW_<controller>_SUBSYS_<subsystem>…xml`, bound (per its security
+//!   key, `INTELAUDIO\CTLR_DEV_<controller>`) to the audio controller's PCI device id.
+//!
+//! SUBSYS is usually hex, but some vendors use a text tag (Lenovo's `IDEA4002`).
 //!
 //! Matching follows the tiers worked out by the speaker-tuning-to-easyeffects
 //! project: the exact device first, a subsystem-only match as a warned
@@ -21,6 +25,8 @@ pub struct MachineIds {
     pub sdw: Vec<(String, String)>,
     /// PCI subsystems of audio controllers as `<device><vendor>`, uppercase hex.
     pub pci_subsys: Vec<String>,
+    /// Audio controllers as (PCI device id, subsystem), uppercase hex.
+    pub controllers: Vec<(String, String)>,
     /// HD-Audio codecs as (device, subsystem), uppercase hex.
     pub hda: Vec<(String, String)>,
 }
@@ -52,7 +58,11 @@ impl MachineIds {
                 let (v, d) = (read("subsystem_vendor"), read("subsystem_device"));
                 let key = format!("{}{}", d.trim_start_matches("0x"), v.trim_start_matches("0x")).to_uppercase();
                 if key.len() == 8 && !ids.pci_subsys.contains(&key) {
-                    ids.pci_subsys.push(key);
+                    ids.pci_subsys.push(key.clone());
+                }
+                let dev = read("device").trim_start_matches("0x").to_uppercase();
+                if dev.len() == 4 && key.len() == 8 && !ids.controllers.contains(&(dev.clone(), key.clone())) {
+                    ids.controllers.push((dev, key));
                 }
             }
         }
@@ -88,8 +98,8 @@ impl MachineIds {
         for (d, s) in &self.hda {
             parts.push(format!("HDA codec {d} subsystem {s}"));
         }
-        for s in &self.pci_subsys {
-            parts.push(format!("PCI subsystem {s}"));
+        for (d, s) in &self.controllers {
+            parts.push(format!("audio controller {d} subsystem {s}"));
         }
         if parts.is_empty() { "no audio hardware IDs found".into() } else { parts.join(", ") }
     }
@@ -100,13 +110,25 @@ impl MachineIds {
 pub enum Key {
     SoundWire { man: String, func: String, subsys: String },
     Hda { dev: String, subsys: String },
+    Controller { dev: String, subsys: String },
 }
 
-/// Hex digits right after `tag` in `s`.
-fn hex_after(s: &str, tag: &str, len: usize) -> Option<String> {
+/// `len` characters right after `tag` in `s`, all hex digits (or, with
+/// `alnum`, any ASCII letters and digits).
+fn field_after(s: &str, tag: &str, len: usize, alnum: bool) -> Option<String> {
     let i = s.find(tag)? + tag.len();
     let h: String = s[i..].chars().take(len).collect();
-    (h.len() == len && h.chars().all(|c| c.is_ascii_hexdigit())).then_some(h)
+    let ok = |c: char| if alnum { c.is_ascii_alphanumeric() } else { c.is_ascii_hexdigit() };
+    (h.len() == len && h.chars().all(ok)).then_some(h)
+}
+
+fn hex_after(s: &str, tag: &str, len: usize) -> Option<String> {
+    field_after(s, tag, len, false)
+}
+
+/// SUBSYS is usually hex, but some vendors use a text vendor tag (`IDEA4002`).
+fn subsys_after(s: &str) -> Option<String> {
+    field_after(s, "SUBSYS_", 8, true)
 }
 
 /// Parse a speaker-tuning file name; `None` for anything else, including the
@@ -117,15 +139,18 @@ pub fn parse_name(file: &str) -> Option<Key> {
     if ["_SETTINGS", "_DMIC", "_AMIC"].iter().any(|c| stem.ends_with(c)) {
         return None;
     }
-    if stem.contains("SOUNDWIRE") || stem.starts_with("SDW_") {
+    if stem.contains("SOUNDWIRE") || (stem.starts_with("SDW_") && stem.contains("MAN_")) {
         return Some(Key::SoundWire {
             man: hex_after(stem, "MAN_", 4)?.to_lowercase(),
             func: hex_after(stem, "FUNC_", 4)?.to_lowercase(),
-            subsys: hex_after(stem, "SUBSYS_", 8)?,
+            subsys: subsys_after(stem)?,
         });
     }
+    if stem.starts_with("SDW_") {
+        return Some(Key::Controller { dev: hex_after(stem, "SDW_", 4)?, subsys: subsys_after(stem)? });
+    }
     let dev = hex_after(stem, "DEV_", 4)?;
-    let subsys = hex_after(stem, "SUBSYS_", 8)?;
+    let subsys = subsys_after(stem)?;
     Some(Key::Hda { dev, subsys })
 }
 
@@ -147,6 +172,15 @@ pub fn score(key: &Key, ids: &MachineIds) -> Fit {
                 Fit::Exact
             } else {
                 Fit::Partial
+            }
+        }
+        Key::Controller { dev, subsys } => {
+            if ids.controllers.iter().any(|(d, s)| d == dev && s == subsys) {
+                Fit::Exact
+            } else if ids.pci_subsys.contains(subsys) {
+                Fit::Partial
+            } else {
+                Fit::None
             }
         }
         Key::Hda { dev, subsys } => {
@@ -287,6 +321,7 @@ mod tests {
         MachineIds {
             sdw: vec![("01fa".into(), "3556".into()), ("01fa".into(), "4243".into())],
             pci_subsys: vec!["1E131043".into()],
+            controllers: vec![("A828".into(), "1E131043".into())],
             hda: vec![],
         }
     }
@@ -309,6 +344,16 @@ mod tests {
             parse_name("HDAUDIO_DEV_0257_SUBSYS_17AA3852.xml"),
             Some(Key::Hda { dev: "0257".into(), subsys: "17AA3852".into() })
         );
+        // Lenovo IdeaPad installers use a text vendor tag in SUBSYS.
+        assert_eq!(
+            parse_name("AUCD_DEV_0C29_SUBSYS_IDEA4002.xml"),
+            Some(Key::Hda { dev: "0C29".into(), subsys: "IDEA4002".into() })
+        );
+        // Short SDW_ names bind to the audio controller's PCI device id.
+        assert_eq!(
+            parse_name("SDW_51CC_SUBSYS_230117AA_PCI_SUBSYS_230117AA.xml"),
+            Some(Key::Controller { dev: "51CC".into(), subsys: "230117AA".into() })
+        );
         for skip in ["DEV_0287_SUBSYS_17AA38C5_settings.xml", "DEV_0287_SUBSYS_17AA38C5_dmic.xml", "readme.xml", "DEV_0287.inf"] {
             assert_eq!(parse_name(skip), None, "{skip}");
         }
@@ -323,6 +368,14 @@ mod tests {
         assert_eq!(score(&sdw("3556", "CA0A144D"), &ids), Fit::None, "same amp on another laptop");
         // The HDA tuning keyed to the same PCI subsystem needs that codec present.
         assert_eq!(score(&Key::Hda { dev: "0294".into(), subsys: "10431E13".into() }, &ids), Fit::None);
+        let ctl = MachineIds {
+            pci_subsys: vec!["230117AA".into()],
+            controllers: vec![("51CC".into(), "230117AA".into())],
+            ..Default::default()
+        };
+        assert_eq!(score(&Key::Controller { dev: "51CC".into(), subsys: "230117AA".into() }, &ctl), Fit::Exact);
+        assert_eq!(score(&Key::Controller { dev: "A828".into(), subsys: "230117AA".into() }, &ctl), Fit::Partial);
+        assert_eq!(score(&Key::Controller { dev: "51CC".into(), subsys: "1E131043".into() }, &ctl), Fit::None);
         let hda = MachineIds { hda: vec![("0287".into(), "17AA38C5".into())], ..Default::default() };
         assert_eq!(score(&Key::Hda { dev: "0287".into(), subsys: "17AA38C5".into() }, &hda), Fit::Exact);
         // Lenovo reuses subsystems across codecs: that's only a partial match.
