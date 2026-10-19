@@ -76,6 +76,33 @@ pub struct VirtualBass {
     pub hp_freq: f32,
 }
 
+/// Loudness compensation for the low end: the quieter the playback, the more
+/// the low bands are lifted, the way DAX on Windows keeps bass at low volume.
+/// Not in the tuning file; speaker-tuning-to-easyeffects measured DAX boosting
+/// quiet sustained bass far beyond what the XML describes. The playback level is
+/// read from the bands above 200 Hz after the app/sink volume, so bass-heavy
+/// content doesn't lower its own boost.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BassLoudness {
+    pub enable: bool,
+    /// Largest boost, in dB.
+    pub max_db: f32,
+    /// Playback level (dB re a full-scale sine) at and above which there is no boost.
+    pub ref_db: f32,
+    /// dB of boost per dB of level below `ref_db`.
+    pub slope: f32,
+    /// Shelf corner: a band at this frequency gets half the boost.
+    pub corner_hz: f32,
+    /// Level averaging time in seconds.
+    pub time_s: f32,
+}
+
+impl Default for BassLoudness {
+    fn default() -> Self {
+        BassLoudness { enable: false, max_db: 9.0, ref_db: -12.0, slope: 0.5, corner_hz: 150.0, time_s: 2.0 }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ieq {
     pub enable: bool,
@@ -147,6 +174,9 @@ pub struct Params {
     pub widener: Widener,
     pub peq: Peq,
     pub vbass: VirtualBass,
+    /// Added after the first release; older saved overrides lack it.
+    #[serde(default)]
+    pub loudness: BassLoudness,
     pub ieq: Ieq,
     pub optimizer: Optimizer,
     pub volmax: Volmax,
@@ -192,6 +222,7 @@ impl Params {
                 hp_enable: false,
                 hp_freq: 120.0,
             },
+            loudness: BassLoudness::default(),
             ieq: Ieq {
                 enable: p.ieq_enable && !off,
                 curve: p.ieq_preset.clone(),
@@ -511,6 +542,13 @@ pub fn sections(p: &Params, band_freqs: &[f32; NBANDS]) -> Vec<Section> {
             b("/vbass/hp_enable", "Dry high-pass"),
             f("/vbass/hp_freq", "Dry HP freq", 40.0, 300.0, 5.0, "Hz"),
         ]),
+        sec("Bass loudness", Some("/loudness/enable"), vec![
+            f("/loudness/max_db", "Max boost", 0.0, 18.0, 0.5, "dB"),
+            f("/loudness/ref_db", "Full-volume level", -40.0, 0.0, 1.0, "dB"),
+            f("/loudness/slope", "Boost per dB quieter", 0.05, 1.5, 0.05, ""),
+            f("/loudness/corner_hz", "Corner", 60.0, 400.0, 5.0, "Hz"),
+            f("/loudness/time_s", "Averaging time", 0.2, 10.0, 0.1, "s"),
+        ]),
         sec("Intelligent EQ", Some("/ieq/enable"), vec![
             Spec {
                 path: "/ieq/curve".into(),
@@ -535,6 +573,17 @@ pub fn sections(p: &Params, band_freqs: &[f32; NBANDS]) -> Vec<Section> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overrides_saved_before_bass_loudness_still_load() {
+        let t = crate::tuning::test_tuning();
+        let mut v = serde_json::to_value(factory(&t, "music").unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("loudness");
+        let saved = Saved { overrides: [("music".into(), serde_json::from_value(v).unwrap())].into(), ..Default::default() };
+        let text = toml::to_string(&saved).unwrap();
+        let back: Saved = toml::from_str(&text).unwrap();
+        assert_eq!(back.overrides["music"].loudness, BassLoudness::default());
+    }
 
     #[test]
     fn set_by_path() {

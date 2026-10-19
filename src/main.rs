@@ -60,6 +60,12 @@ enum Cmd {
         /// Enable the virtual bass stage.
         #[arg(long)]
         vbass: bool,
+        /// Enable the bass loudness stage.
+        #[arg(long)]
+        loudness: bool,
+        /// Scale the input first, like the volume of the Neiro DSP sink.
+        #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+        volume_db: f32,
         /// Use saved user overrides for the profile if present.
         #[arg(long)]
         saved: bool,
@@ -129,8 +135,9 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Render { input, output, profile, vbass, saved, stats, tuning } => {
-            render(&tuning.load()?, &input, &output, &profile, vbass, saved, stats)
+        Cmd::Render { input, output, profile, vbass, loudness, volume_db, saved, stats, tuning } => {
+            let opts = RenderOpts { vbass, loudness, volume_db, saved, stats };
+            render(&tuning.load()?, &input, &output, &profile, &opts)
         }
         Cmd::Import { source, list } => discover::import(&source, list),
         Cmd::DumpTuning { tuning } => {
@@ -158,7 +165,16 @@ fn main() -> Result<()> {
     }
 }
 
-fn render(t: &tuning::Tuning, input: &PathBuf, output: &PathBuf, profile: &str, vbass: bool, saved: bool, stats: bool) -> Result<()> {
+struct RenderOpts {
+    vbass: bool,
+    loudness: bool,
+    volume_db: f32,
+    saved: bool,
+    stats: bool,
+}
+
+fn render(t: &tuning::Tuning, input: &PathBuf, output: &PathBuf, profile: &str, opts: &RenderOpts) -> Result<()> {
+    let &RenderOpts { vbass, loudness, volume_db, saved, stats } = opts;
     let t = t.clone();
     let mut p = params::factory(&t, profile)?;
     if saved {
@@ -167,6 +183,7 @@ fn render(t: &tuning::Tuning, input: &PathBuf, output: &PathBuf, profile: &str, 
         }
     }
     p.vbass.enable |= vbass;
+    p.loudness.enable |= loudness;
     let mut rd = hound::WavReader::open(input).with_context(|| format!("opening {}", input.display()))?;
     let spec = rd.spec();
     if spec.sample_rate != 48000 {
@@ -182,7 +199,8 @@ fn render(t: &tuning::Tuning, input: &PathBuf, output: &PathBuf, profile: &str, 
     let ch = spec.channels as usize;
     let frames = samples.len() / ch;
     let get = |c: usize| -> Vec<f32> {
-        let mut v: Vec<f32> = (0..frames).map(|i| samples[i * ch + c.min(ch - 1)]).collect();
+        let g = 10f32.powf(volume_db / 20.0);
+        let mut v: Vec<f32> = (0..frames).map(|i| g * samples[i * ch + c.min(ch - 1)]).collect();
         v.extend(std::iter::repeat_n(0.0, LATENCY));
         v
     };
@@ -193,6 +211,7 @@ fn render(t: &tuning::Tuning, input: &PathBuf, output: &PathBuf, profile: &str, 
     // Block-wise like the live node, so meters can be sampled.
     let nb = tuning::NBANDS;
     let (mut ieq, mut gr, mut lvl, mut count) = (vec![0f64; nb], vec![0f64; nb], vec![0f64; nb], 0usize);
+    let mut bass = 0f64;
     for s in (0..l.len()).step_by(1024) {
         let e2 = (s + 1024).min(l.len());
         e.process(&l[s..e2], &r[s..e2], &mut ol[s..e2], &mut or[s..e2]);
@@ -202,6 +221,7 @@ fn render(t: &tuning::Tuning, input: &PathBuf, output: &PathBuf, profile: &str, 
                 gr[b] += e.meters.gr_db[b] as f64;
                 lvl[b] += e.meters.level_db[b] as f64;
             }
+            bass += e.meters.bass_db as f64;
             count += 1;
         }
     }
@@ -213,6 +233,9 @@ fn render(t: &tuning::Tuning, input: &PathBuf, output: &PathBuf, profile: &str, 
         row("level", &lvl);
         row("ieq", &ieq);
         row("dyn gr", &gr);
+        if p.loudness.enable {
+            println!("bass loudness boost {:.1} dB", bass / count as f64);
+        }
     }
     let out_spec = hound::WavSpec { channels: 2, sample_rate: 48000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
     let mut w = hound::WavWriter::create(output, out_spec)?;

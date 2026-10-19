@@ -120,6 +120,14 @@ impl Config {
             b.static_db[0][i] = ol;
             b.static_db[1][i] = or;
         }
+        let lb = &p.loudness;
+        b.lb_enable = lb.enable;
+        b.lb_max_db = lb.max_db.max(0.0);
+        // The speaker's own volume lowers the real playback level too.
+        b.lb_ref_db = lb.ref_db + hw_comp_db.clamp(0.0, 60.0);
+        b.lb_slope = lb.slope.max(0.0);
+        b.lb_weight = t.band_freqs.map(|f| 1.0 / (1.0 + (f / lb.corner_hz.max(1.0)).powi(2)));
+        b.lb_time_s = lb.time_s;
         b.ieq_enable = p.ieq.enable;
         if let Some(curve) = t.ieq_curves.get(&p.ieq.curve) {
             b.ieq_target = *curve;
@@ -181,6 +189,9 @@ pub struct MeterSnapshot {
     pub in_peak_db: f32,
     pub out_peak_db: f32,
     pub limiter_gr_db: f32,
+    /// Current bass-loudness boost, dB (0 when the stage is off).
+    #[serde(default)]
+    pub bass_db: f32,
     /// VU (≈300 ms RMS) in dBFS: in L, in R, out L, out R.
     #[serde(default = "silent4")]
     pub vu_db: [f32; 4],
@@ -198,6 +209,7 @@ impl Default for MeterSnapshot {
             in_peak_db: -120.0,
             out_peak_db: -120.0,
             limiter_gr_db: 0.0,
+            bass_db: 0.0,
             vu_db: silent4(),
             peak_db: silent4(),
         }
@@ -223,7 +235,7 @@ pub struct SharedMeters {
 impl Default for SharedMeters {
     fn default() -> Self {
         SharedMeters {
-            vals: (0..NBANDS * 3 + 1 + 4).map(|_| AtomicU32::new(0)).collect(),
+            vals: (0..NBANDS * 3 + 2 + 4).map(|_| AtomicU32::new(0)).collect(),
             peaks: Default::default(),
         }
     }
@@ -233,7 +245,7 @@ impl SharedMeters {
     /// `peaks` are linear block peaks; non-negative f32 bit patterns order like
     /// integers, so `fetch_max` on the bits keeps the true maximum.
     pub fn store(&self, m: &MeterSnapshot, peaks: &[f32; 4]) {
-        let tail = [m.limiter_gr_db];
+        let tail = [m.limiter_gr_db, m.bass_db];
         let it = m.gr_db.iter().chain(&m.ieq_db).chain(&m.level_db).chain(tail.iter()).chain(&m.vu_db);
         for (slot, v) in self.vals.iter().zip(it) {
             slot.store(v.to_bits(), Ordering::Relaxed);
@@ -250,7 +262,8 @@ impl SharedMeters {
         m.ieq_db.copy_from_slice(&v[NBANDS..2 * NBANDS]);
         m.level_db.copy_from_slice(&v[2 * NBANDS..3 * NBANDS]);
         m.limiter_gr_db = v[3 * NBANDS];
-        m.vu_db.copy_from_slice(&v[3 * NBANDS + 1..3 * NBANDS + 5]);
+        m.bass_db = v[3 * NBANDS + 1];
+        m.vu_db.copy_from_slice(&v[3 * NBANDS + 2..3 * NBANDS + 6]);
         for (k, slot) in self.peaks.iter().enumerate() {
             m.peak_db[k] = to_db(f32::from_bits(slot.swap(0, Ordering::Relaxed)));
         }
@@ -429,6 +442,7 @@ impl Engine {
             in_peak_db: to_db(peak[0].max(peak[1])),
             out_peak_db: to_db(peak[2].max(peak[3])),
             limiter_gr_db: self.lim.gr_db,
+            bass_db: bm.bass_db,
             vu_db: self.vu_ms.map(|ms| 10.0 * ms.max(1e-12).log10()),
             peak_db: peak.map(to_db),
         };

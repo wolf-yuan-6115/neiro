@@ -1212,10 +1212,13 @@ impl App {
                 m.ieq_db[b],
                 m.level_db[b].max(-120.0)
             ),
-            None => format!(
-                " Dynamics gain reduction per band · in {:>6.1} dBFS · out {:>6.1} dBFS · limiter {:>5.1} dB ",
-                m.in_peak_db, m.out_peak_db, m.limiter_gr_db
-            ),
+            None => {
+                let bass = if m.bass_db > 0.05 { format!(" · bass {:+.1} dB", m.bass_db) } else { String::new() };
+                format!(
+                    " Dynamics gain reduction per band · in {:>6.1} dBFS · out {:>6.1} dBFS · limiter {:>5.1} dB{bass} ",
+                    m.in_peak_db, m.out_peak_db, m.limiter_gr_db
+                )
+            }
         };
         let block = Block::new().borders(Borders::ALL).title(if hovered.is_some() { Line::from(title).cyan() } else { Line::from(title) });
         f.render_widget(block, area);

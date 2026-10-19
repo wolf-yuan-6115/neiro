@@ -33,6 +33,10 @@ the next start restores everything first.
 5. a 20-band stage on the factory band layout:
    - **intelligent EQ:** slowly steers the spectrum toward Dolby's target curve
    - speaker correction EQ
+   - **bass loudness** (optional): lifts the low bands as playback gets quieter, up to
+     9 dB by default. It follows the level after your volume, so it acts like the
+     volume-dependent bass DAX has on Windows. The tuning file has no setting for it; the
+     defaults give no boost at full volume on modern masters.
    - **Volmax**
    - multiband compressor (up to 4 groups)
    - the **regulator:** a per-band soft-knee limiter using the factory thresholds. This is

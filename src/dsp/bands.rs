@@ -34,6 +34,14 @@ pub struct BandConfig {
     /// Windows by speaker-tuning-to-easyeffects), so the boost must not push
     /// the bands into limiting earlier.
     pub volmax_db: f32,
+    /// Bass loudness: boost `weight[b] * min(max, slope * (ref - level))` dB,
+    /// where `level` is the smoothed level of the bands above 200 Hz.
+    pub lb_enable: bool,
+    pub lb_max_db: f32,
+    pub lb_ref_db: f32,
+    pub lb_slope: f32,
+    pub lb_weight: [f32; NBANDS],
+    pub lb_time_s: f32,
     pub ieq_enable: bool,
     pub ieq_target: [f32; NBANDS],
     /// 0..1
@@ -57,6 +65,12 @@ impl Default for BandConfig {
         BandConfig {
             static_db: [[0.0; NBANDS]; 2],
             volmax_db: 0.0,
+            lb_enable: false,
+            lb_max_db: 0.0,
+            lb_ref_db: 0.0,
+            lb_slope: 0.0,
+            lb_weight: [0.0; NBANDS],
+            lb_time_s: 2.0,
             ieq_enable: false,
             ieq_target: [0.0; NBANDS],
             ieq_amount: 0.0,
@@ -138,6 +152,8 @@ pub struct BandMeters {
     pub ieq_db: [f32; NBANDS],
     /// Detected input level per band, dBFS.
     pub level_db: [f32; NBANDS],
+    /// Current bass-loudness boost before the per-band shelf weighting, dB.
+    pub bass_db: f32,
 }
 
 pub struct BandProcessor {
@@ -159,6 +175,10 @@ pub struct BandProcessor {
     ref_power: f32,
     ieq_avg: [f64; NBANDS],
     ieq_primed: bool,
+    /// Bands that measure the playback level for bass loudness.
+    lb_detect: [bool; NBANDS],
+    /// Smoothed playback level, dB; `None` until there has been signal.
+    lb_level: Option<f32>,
     mbc_env: [f32; MAX_GROUPS],
     reg_env: [f32; NBANDS],
     cfg: BandConfig,
@@ -211,6 +231,8 @@ impl BandProcessor {
             ref_power: 1.0,
             ieq_avg: [0.0; NBANDS],
             ieq_primed: false,
+            lb_detect: band_freqs.map(|f| f >= 200.0),
+            lb_level: None,
             mbc_env: [0.0; MAX_GROUPS],
             reg_env: [0.0; NBANDS],
             cfg: BandConfig::default(),
@@ -287,10 +309,36 @@ impl BandProcessor {
         }
         self.meters.ieq_db = ieq;
 
-        // Level each dynamics stage sees, after static EQ and IEQ.
+        // Bass loudness: follow the playback level, rising faster than falling so
+        // a loud entrance isn't over-boosted for long. Pauses hold the last level.
+        let mut lb = [0f32; NBANDS];
+        self.meters.bass_db = 0.0;
+        if cfg.lb_enable {
+            let p: f32 = (0..NBANDS).filter(|&b| self.lb_detect[b]).map(|b| power[0][b].max(power[1][b])).sum();
+            let now = 10.0 * (p / self.ref_power + 1e-14).log10();
+            if now > -70.0 {
+                self.lb_level = Some(match self.lb_level {
+                    None => now,
+                    Some(prev) => {
+                        let tau = if now > prev { cfg.lb_time_s * 0.25 } else { cfg.lb_time_s };
+                        let a = (-dt / tau.max(0.05)).exp();
+                        now + a * (prev - now)
+                    }
+                });
+            }
+            if let Some(lvl) = self.lb_level {
+                let boost = ((cfg.lb_ref_db - lvl) * cfg.lb_slope).clamp(0.0, cfg.lb_max_db);
+                self.meters.bass_db = boost;
+                for b in 0..NBANDS {
+                    lb[b] = boost * cfg.lb_weight[b];
+                }
+            }
+        }
+
+        // Level each dynamics stage sees, after static EQ, IEQ and bass loudness.
         let mut det = [0f32; NBANDS];
         for b in 0..NBANDS {
-            det[b] = level[b] + 0.5 * (cfg.static_db[0][b] + cfg.static_db[1][b]) + ieq[b];
+            det[b] = level[b] + 0.5 * (cfg.static_db[0][b] + cfg.static_db[1][b]) + ieq[b] + lb[b];
         }
 
         let att = |ms: f32| (-dt / (ms.max(0.1) * 1e-3)).exp();
@@ -357,7 +405,7 @@ impl BandProcessor {
         for c in 0..2 {
             let mut total = [0f32; NBANDS];
             for b in 0..NBANDS {
-                total[b] = cfg.static_db[c][b] + ieq[b] + mbc_db[b] + reg_db[b] + cfg.volmax_db;
+                total[b] = cfg.static_db[c][b] + ieq[b] + lb[b] + mbc_db[b] + reg_db[b] + cfg.volmax_db;
             }
             for (k, &(b0, b1, fr)) in self.bin_interp.iter().enumerate() {
                 let db = total[b0] + (total[b1] - total[b0]) * fr;
@@ -478,6 +526,57 @@ mod tests {
         p.set_config(&cfg);
         let g = sine_gain(&mut p, 3000.0, 0.01);
         assert!((g - 6.0).abs() < 0.5, "quiet tone gain {g}");
+    }
+
+    /// Gain at `probe` Hz (a quiet tone) while a 1 kHz tone of `amp` sets the playback level.
+    fn probe_gain(p: &mut BandProcessor, amp: f32, probe: f32) -> f32 {
+        let n = 3 * 48000;
+        let w = |f: f32, i: usize| (2.0 * std::f32::consts::PI * f * i as f32 / 48000.0).sin();
+        let input: Vec<f32> = (0..n).map(|i| amp * w(1000.0, i) + 0.01 * w(probe, i)).collect();
+        let (mut l, mut r) = (input.clone(), input.clone());
+        p.process(&mut l, &mut r);
+        // Magnitude of the probe component over the last second; delay doesn't matter.
+        let mag = |x: &[f32]| {
+            let (mut re, mut im) = (0f64, 0f64);
+            for i in n - 48000..n {
+                let ph = 2.0 * std::f64::consts::PI * probe as f64 * i as f64 / 48000.0;
+                re += x[i] as f64 * ph.cos();
+                im += x[i] as f64 * ph.sin();
+            }
+            (re * re + im * im).sqrt()
+        };
+        (20.0 * (mag(&l) / mag(&input)).log10()) as f32
+    }
+
+    #[test]
+    fn bass_loudness_follows_playback_level() {
+        let mut cfg = BandConfig::default();
+        cfg.lb_enable = true;
+        cfg.lb_max_db = 9.0;
+        cfg.lb_ref_db = -12.0;
+        cfg.lb_slope = 0.5;
+        cfg.lb_weight[0] = 1.0;
+        cfg.lb_weight[1] = 1.0;
+        cfg.lb_time_s = 0.2;
+        let run = |amp: f32| {
+            let mut p = BandProcessor::new(48000.0, &freqs());
+            p.set_config(&cfg);
+            (probe_gain(&mut p, amp, 50.0), p.meters.bass_db)
+        };
+        // Loud playback (-6 dB): no boost.
+        let (g, m) = run(0.5);
+        assert!(g.abs() < 0.5 && m < 0.1, "loud: {g} dB, meter {m}");
+        // 14 dB quieter (-20 dB): half a dB per dB below -12.
+        let (g, m) = run(0.1);
+        assert!((g - 4.0).abs() < 0.7, "medium: {g} dB, meter {m}");
+        // Very quiet: capped at the maximum.
+        let (g, _) = run(0.01);
+        assert!((g - 9.0).abs() < 0.7, "quiet: {g} dB");
+        // Off: transparent.
+        cfg.lb_enable = false;
+        let mut p = BandProcessor::new(48000.0, &freqs());
+        p.set_config(&cfg);
+        assert!(probe_gain(&mut p, 0.01, 50.0).abs() < 0.1);
     }
 
     #[test]

@@ -22,7 +22,7 @@ cargo test --release <name> -- --nocapture   # see printed renders/measurements
 ./target/release/neiro daemon         # run the PipeWire node + control socket (Ctrl+C restores audio)
 ./target/release/neiro                # TUI (default subcommand)
 ./target/release/neiro status | toggle [on|off] | profile <name>
-./target/release/neiro render in.wav out.wav --profile music [--vbass] [--saved] [--stats]   # offline, 48 kHz only
+./target/release/neiro render in.wav out.wav --profile music [--vbass] [--loudness] [--volume-db=-20] [--saved] [--stats]   # offline, 48 kHz only
 ./target/release/neiro import <xml|dir|windows-mount> [--list]   # match + install this machine's tuning
 ./target/release/neiro dump-tuning [--tuning F] [--mode M]   # modes, profiles, parsed Params
 ./target/release/neiro segment <file> # hidden: which 10 s the tuner would pick
@@ -69,7 +69,8 @@ parameter descriptors.
 
 **DSP chain** (`dsp/chain.rs` `run_wet`):
 - Order: pregain → widener → speaker PEQ → virtual bass → personal EQ → 20-band STFT stage (`dsp/bands.rs`) → postgain → lookahead limiter.
-  - The STFT stage applies optimizer, volmax, adaptive IEQ, MB compressor and regulator as per-bin gains.
+  - The STFT stage applies optimizer, volmax, adaptive IEQ, bass loudness, MB compressor and regulator as per-bin gains.
+  - Bass loudness is not from the tuning file. It boosts the low bands by how far the level of the bands above 200 Hz is below a reference, so it tracks the sink volume. Old saved overrides lack `Params::loudness`, hence `#[serde(default)]`.
 - Latency is fixed: `chain::LATENCY` = 1024 (STFT) + 48 (limiter). Bypass crossfades to a dry path delayed by exactly that, bit-exact.
 - Personal EQ runs two chains (A/B sides) that crossfade. This is what makes tuner switching click-free.
 - Interpretation guesses for the undocumented Dolby fields are in code comments and the README: MB compressor field order, regulator knee = `threshold_high - threshold_low`, timbre preservation.
