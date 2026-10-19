@@ -172,6 +172,8 @@ enum Hit {
     Keep(bool),
     /// The "speaker is the default" warning: true makes neiro the default, false dismisses.
     RouteFix(bool),
+    /// Header chip shown while Neiro DSP isn't the output; reopens the notice.
+    RouteChip,
     Band(usize),
     Level(usize),
 }
@@ -199,6 +201,7 @@ impl Hit {
             Hit::Keep(false) => " click: discard this result",
             Hit::RouteFix(true) => " click: make Neiro DSP the default output",
             Hit::RouteFix(false) => " click: hide this",
+            Hit::RouteChip => " click: Neiro DSP isn't the output; show options",
             Hit::Band(_) | Hit::Level(_) => return None,
         })
     }
@@ -811,6 +814,7 @@ impl App {
             Hit::AutoSwitch => self.toggle_auto(),
             Hit::RouteFix(true) => self.make_default(),
             Hit::RouteFix(false) => self.dismiss_route(),
+            Hit::RouteChip => self.route_dismissed = false,
             Hit::Keep(keep) => {
                 self.request(Request::TunerStop { keep });
                 self.flash(if keep { "personal EQ saved — it applies on every profile" } else { "result discarded" });
@@ -874,10 +878,23 @@ impl App {
         // Header: power badge (clickable) + profile tabs (clickable).
         let mut rb = RowBuilder::new(header.x + 1, header.y, self.mouse);
         rb.text(" neiro ", Style::new());
+        // Processing can be on while nothing plays through it: say where sound goes.
+        let elsewhere = st.default_output.as_ref().filter(|o| o.0 != SINK_NAME);
         if st.bypass {
             rb.button(" BYPASS ", Style::new().bg(Color::DarkGray).fg(Color::White).bold(), Hit::Power);
+        } else if elsewhere.is_some() {
+            rb.button(" ○ ON ", Style::new().fg(Color::Green).bold(), Hit::Power);
         } else {
             rb.button(" ● ON ", Style::new().bg(Color::Green).fg(Color::Black).bold(), Hit::Power);
+        }
+        if let Some((name, desc)) = elsewhere {
+            if *name == st.target {
+                rb.button(" ⚠ apps skip neiro ", Style::new().fg(Color::Black).bg(Color::Yellow).bold(), Hit::RouteChip);
+            } else {
+                let short: String = desc.chars().take(28).collect();
+                let more = if desc.chars().count() > 28 { "…" } else { "" };
+                rb.button(format!(" idle · output: {short}{more} "), Style::new().fg(Color::Cyan), Hit::RouteChip);
+            }
         }
         if st.dirty {
             rb.text(" unsaved ", Style::new().fg(Color::Yellow));
@@ -1507,7 +1524,9 @@ mod tests {
         let set = |app: &mut App, o: &(String, String)| app.state.as_mut().unwrap().default_output = Some(o.clone());
         app.state = Some(fake_state(None));
         set(&mut app, &neiro);
-        assert!(!render(&mut app).contains("Neiro DSP is not"), "no notice while neiro is the output");
+        let out = render(&mut app);
+        assert!(!out.contains("Neiro DSP is not"), "no notice while neiro is the output");
+        assert!(out.contains("● ON") && !out.contains("idle ·"));
 
         // The speaker itself: apps skip neiro by mistake.
         set(&mut app, &speaker);
@@ -1527,9 +1546,18 @@ mod tests {
         assert!(out.contains("use Neiro DSP anyway"));
         // Esc hides it, also across output changes, until neiro is the output again.
         assert!(app.key(KeyCode::Esc, KeyModifiers::NONE), "esc must not quit while the notice shows");
+        let out = render(&mut app);
+        assert!(!out.contains("Neiro DSP is not"));
+        // The header still says so, and clicking that reopens the notice.
+        assert!(out.contains("○ ON") && out.contains("idle · output: Pumper USB DAC Analog Stereo "), "{out}");
+        let chip = app.hits.iter().find(|(_, h)| matches!(h, Hit::RouteChip)).map(|(r, _)| *r).unwrap();
+        app.click(Hit::RouteChip, chip, chip.x);
+        assert!(render(&mut app).contains("Neiro DSP is not the output"));
+        app.key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(!render(&mut app).contains("Neiro DSP is not"));
         set(&mut app, &speaker);
-        assert!(!render(&mut app).contains("neiro is not in use"));
+        let out = render(&mut app);
+        assert!(!out.contains("neiro is not in use") && out.contains("⚠ apps skip neiro"));
         set(&mut app, &neiro);
         render(&mut app);
         set(&mut app, &dac);
