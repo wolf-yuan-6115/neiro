@@ -1,4 +1,5 @@
 mod daemon;
+mod discover;
 mod clip;
 mod demo;
 mod dsp;
@@ -17,7 +18,7 @@ use dsp::chain::{Config, Engine, LATENCY};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "neiro", about = "neiro (音色): speaker enhancement for the Zenbook S14 on PipeWire")]
+#[command(name = "neiro", about = "neiro (音色): laptop speaker enhancement on PipeWire, using the Dolby tuning from your Windows driver")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -27,9 +28,17 @@ struct Cli {
 enum Cmd {
     /// Run the PipeWire DSP node and control socket.
     Daemon {
-        /// Use a different tuning.xml instead of the embedded one.
+        /// Use this tuning XML instead of the configured one.
         #[arg(long)]
         tuning: Option<PathBuf>,
+    },
+    /// Install this machine's speaker tuning from a Windows partition, driver folder or XML.
+    Import {
+        /// A tuning XML, an unpacked driver package, or a mounted Windows partition.
+        source: PathBuf,
+        /// Only list the matching tunings; don't install anything.
+        #[arg(long)]
+        list: bool,
     },
     /// Interactive terminal UI (default).
     Tui,
@@ -57,17 +66,37 @@ enum Cmd {
         /// Print average per-band IEQ correction and dynamics gain reduction.
         #[arg(long)]
         stats: bool,
+        #[command(flatten)]
+        tuning: TuningArgs,
     },
-    /// Print the parsed tuning profiles.
+    /// Print the parsed tuning: modes, profiles and their parameters.
     DumpTuning {
-        #[arg(long)]
-        tuning: Option<PathBuf>,
+        #[command(flatten)]
+        tuning: TuningArgs,
     },
     /// Install and start the systemd user service.
     Install,
     /// Show which section of a song the A/B tuner would play.
     #[command(hide = true)]
     Segment { file: PathBuf },
+}
+
+#[derive(clap::Args)]
+struct TuningArgs {
+    /// Tuning XML to use instead of the configured one.
+    #[arg(long)]
+    tuning: Option<PathBuf>,
+    /// Operating mode to read (e.g. "tablet" on convertibles); default from config, else "normal".
+    #[arg(long)]
+    mode: Option<String>,
+}
+
+impl TuningArgs {
+    fn load(&self) -> Result<tuning::Tuning> {
+        let saved = params::Saved::load();
+        let path = tuning::resolve(self.tuning.as_deref(), saved.tuning_path.as_deref())?;
+        tuning::load(&path, self.mode.as_deref().or(saved.mode.as_deref()))
+    }
 }
 
 fn main() -> Result<()> {
@@ -100,11 +129,19 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Render { input, output, profile, vbass, saved, stats } => render(&input, &output, &profile, vbass, saved, stats),
+        Cmd::Render { input, output, profile, vbass, saved, stats, tuning } => {
+            render(&tuning.load()?, &input, &output, &profile, vbass, saved, stats)
+        }
+        Cmd::Import { source, list } => discover::import(&source, list),
         Cmd::DumpTuning { tuning } => {
-            let t = tuning::load(tuning.as_deref())?;
+            let t = tuning.load()?;
+            println!("mode: {} (available: {})", t.mode, t.modes.join(", "));
+            println!("speakers: {} · tuning version: {:?}", t.channels, t.tuning_version);
+            println!("profiles: {} (starts on {})", t.profile_names().join(", "), t.initial_profile());
             println!("bands (Hz): {:?}", t.band_freqs);
-            for (k, v) in &t.ieq_curves {
+            let mut curves: Vec<_> = t.ieq_curves.iter().collect();
+            curves.sort_by_key(|(k, _)| k.as_str());
+            for (k, v) in curves {
                 println!("ieq {k}: {v:?}");
             }
             for p in &t.profiles {
@@ -121,8 +158,8 @@ fn main() -> Result<()> {
     }
 }
 
-fn render(input: &PathBuf, output: &PathBuf, profile: &str, vbass: bool, saved: bool, stats: bool) -> Result<()> {
-    let t = tuning::load(None)?;
+fn render(t: &tuning::Tuning, input: &PathBuf, output: &PathBuf, profile: &str, vbass: bool, saved: bool, stats: bool) -> Result<()> {
+    let t = t.clone();
     let mut p = params::factory(&t, profile)?;
     if saved {
         if let Some(o) = params::Saved::load().overrides.get(profile) {
