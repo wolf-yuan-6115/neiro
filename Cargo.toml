@@ -2,6 +2,9 @@
 name = "neiro"
 version = "0.1.0"
 edition = "2024"
+description = "Laptop speaker enhancement for PipeWire, using the laptop's own Dolby DAX3 tuning"
+authors = ["Wolf Yuan <me@wolf-yuan.dev>"]
+license = "GPL-3.0-or-later"
 
 [dependencies]
 anyhow = "1.0.104"

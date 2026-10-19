@@ -66,3 +66,14 @@ get the tuning from your vendor's driver download.
 Tuning files belong to the laptop and audio vendors. neiro reads the one on your machine
 and never redistributes them. neiro is not affiliated with or endorsed by Dolby or any
 laptop maker.
+
+## License
+
+Copyright (C) 2026 Wolf Yuan <me@wolf-yuan.dev>
+
+neiro is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3
+of the License, or (at your option) any later version. See [`LICENSE`](LICENSE).
+
+The sample excerpts in `samples/` keep their own Creative Commons licenses, listed in
+[`samples/CREDITS.md`](samples/CREDITS.md).
