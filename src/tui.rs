@@ -1467,12 +1467,33 @@ fn param_line(s: &Spec, st: &StateView, width: usize, hovered: bool) -> Line<'st
     }
 }
 
-fn start_daemon() {
-    let unit_ok = std::process::Command::new("systemctl")
-        .args(["--user", "start", "neiro.service"])
+/// The binary the `neiro.service` user unit runs, if the unit exists.
+fn unit_binary() -> Option<PathBuf> {
+    let out = std::process::Command::new("systemctl")
+        .args(["--user", "show", "-p", "ExecStart", "--value", "neiro.service"])
         .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+        .output()
+        .ok()?;
+    parse_exec_path(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `{ path=/usr/bin/neiro ; argv[]=/usr/bin/neiro daemon ; … }` → `/usr/bin/neiro`.
+fn parse_exec_path(exec_start: &str) -> Option<PathBuf> {
+    let rest = exec_start.split("path=").nth(1)?;
+    Some(PathBuf::from(rest.split([' ', ';']).next()?))
+}
+
+fn start_daemon() {
+    // Use the service only if it runs this same binary: a development build must
+    // not silently start an older installed daemon.
+    let exe = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok());
+    let same = unit_binary().and_then(|b| b.canonicalize().ok()).is_some_and(|b| Some(b) == exe);
+    let unit_ok = same
+        && std::process::Command::new("systemctl")
+            .args(["--user", "start", "neiro.service"])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
     if unit_ok {
         return;
     }
@@ -1517,6 +1538,13 @@ mod tests {
             tuner,
             default_output: None,
         }
+    }
+
+    #[test]
+    fn unit_exec_path() {
+        let v = "{ path=/usr/bin/neiro ; argv[]=/usr/bin/neiro daemon ; ignore_errors=no ; start_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }";
+        assert_eq!(parse_exec_path(v), Some(PathBuf::from("/usr/bin/neiro")));
+        assert_eq!(parse_exec_path(""), None);
     }
 
     #[test]
