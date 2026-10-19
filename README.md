@@ -29,21 +29,60 @@ laptop's factory tuning as a PipeWire filter, with a terminal UI to control it.
 ## Requirements
 
 - Linux with PipeWire and WirePlumber
-- A laptop that came with Dolby audio on Windows
+- **A laptop that came with Dolby audio on Windows**, neiro does not generate tuning by itself.
 - Rust, clang and the PipeWire headers to build
 - ffmpeg (optional, for the A/B tuner)
 
-## Quick start
+## Getting started
+
+**1. Install neiro**
 
 ```sh
-cargo install --path .        # build and install `neiro`
-neiro import /mnt/windows     # find and install your laptop's tuning
-neiro install                 # run it as a user service, now and at login
-neiro                         # open the TUI
+cargo install --path .
 ```
 
-No Windows partition? [Getting your tuning](docs/getting-your-tuning.md) explains how to
-get the tuning from your vendor's driver download.
+**2. Import your laptop's tuning.** Point neiro at a mounted Windows partition, or at your
+laptop's Dolby driver download after unpacking it. neiro picks the file that matches your
+hardware.
+
+```sh
+neiro import /mnt/windows
+```
+
+No Windows partition? [Getting your tuning](docs/getting-your-tuning.md) shows where to
+download the driver and how to unpack it.
+
+**3. Start it.** This runs neiro as a user service, now and at every login:
+
+```sh
+neiro install
+```
+
+To try it without the service, run `neiro daemon` in a terminal. Ctrl+C stops it and
+restores your audio.
+
+**4. Listen.** neiro adds a **Neiro DSP** output and makes it the default. Play something
+and open the TUI:
+
+```sh
+neiro
+```
+
+| Key | Action |
+|---|---|
+| `space` | Processing on / off, to compare |
+| `1`–`9`, `0` | Switch profile |
+| `↑` `↓`, `←` `→` | Pick a setting, adjust it |
+| `s` | Save your changes |
+| `q` | Quit (neiro keeps running) |
+
+The mouse works too: click, drag sliders, and hover for hints.
+
+**5. Make it yours (optional).** Under **Personal EQ**, **▶ Find my EQ** runs a blind A/B
+listening test that tunes an EQ to your ears. See [the tuner](docs/tuner.md).
+
+From the command line, `neiro toggle` switches processing on or off, `neiro profile music`
+switches profile, and `neiro status` shows what's running.
 
 ## Documentation
 
