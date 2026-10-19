@@ -2,6 +2,7 @@
 
 use crate::dsp::chain::MeterSnapshot;
 use crate::ipc::{Client, Request, StateView, TunerSource, TunerView};
+use crate::pw::SINK_NAME;
 use crate::params::{Kind, PersonalEq, Spec, ACTION_TUNER, PERSONAL_PREFIX, PE_BANDS, PE_NAMES};
 use crate::demo::Demo;
 use crate::samples::SAMPLES;
@@ -197,7 +198,7 @@ impl Hit {
             Hit::Keep(true) => " click: keep this as your personal EQ",
             Hit::Keep(false) => " click: discard this result",
             Hit::RouteFix(true) => " click: make Neiro DSP the default output",
-            Hit::RouteFix(false) => " click: hide this warning",
+            Hit::RouteFix(false) => " click: hide this",
             Hit::Band(_) | Hit::Level(_) => return None,
         })
     }
@@ -278,7 +279,8 @@ struct App {
     /// Slider being dragged: (parameter index, slider area).
     drag: Option<(usize, Rect)>,
     pick_offset: usize,
-    /// The user hid the "speaker is the default" warning; cleared once it no longer applies.
+    /// The user hid the "not through neiro" notice; it can show again once
+    /// Neiro DSP has been the output.
     route_dismissed: bool,
     /// Requests issued, recorded so tests can check what a click did.
     #[cfg(test)]
@@ -338,9 +340,17 @@ impl App {
         }
     }
 
-    /// Apps are playing straight to the speaker and the user hasn't hidden the warning.
-    fn route_warning(&self) -> bool {
-        self.screen == Screen::Main && !self.route_dismissed && self.state.as_ref().is_some_and(|s| s.speaker_is_default)
+    /// The default output when it isn't Neiro DSP, unless the user hid the notice.
+    fn route_warning(&self) -> Option<(String, String)> {
+        if self.screen != Screen::Main {
+            return None;
+        }
+        let out = self.state.as_ref()?.default_output.clone()?;
+        (out.0 != SINK_NAME && !self.route_dismissed).then_some(out)
+    }
+
+    fn dismiss_route(&mut self) {
+        self.route_dismissed = true;
     }
 
     fn make_default(&mut self) {
@@ -563,10 +573,10 @@ impl App {
             }
             Screen::Main => {}
         }
-        if self.route_warning() {
+        if self.route_warning().is_some() {
             match code {
                 KeyCode::Char('d') | KeyCode::Enter => self.make_default(),
-                KeyCode::Esc => self.route_dismissed = true,
+                KeyCode::Esc => self.dismiss_route(),
                 KeyCode::Char('q') => return false,
                 _ => {}
             }
@@ -789,7 +799,7 @@ impl App {
             Hit::Answer(choice) => self.request(Request::TunerAnswer { choice }),
             Hit::AutoSwitch => self.toggle_auto(),
             Hit::RouteFix(true) => self.make_default(),
-            Hit::RouteFix(false) => self.route_dismissed = true,
+            Hit::RouteFix(false) => self.dismiss_route(),
             Hit::Keep(keep) => {
                 self.request(Request::TunerStop { keep });
                 self.flash(if keep { "personal EQ saved — it applies on every profile" } else { "result discarded" });
@@ -902,11 +912,11 @@ impl App {
             Screen::Tuner => self.draw_tuner(f, main, &st),
         }
         self.draw_meters(f, meters, &st);
-        if !st.speaker_is_default {
+        if st.default_output.as_ref().is_none_or(|o| o.0 == SINK_NAME) {
             self.route_dismissed = false;
         }
-        if self.route_warning() {
-            self.draw_route_warning(f, body);
+        if let Some(out) = self.route_warning() {
+            self.draw_route_warning(f, body, &out, out.0 == st.target);
         }
 
         let help = match (&self.msg, self.hovered().and_then(|h| h.hint())) {
@@ -922,29 +932,56 @@ impl App {
         f.render_widget(Paragraph::new(help), footer);
     }
 
-    fn draw_route_warning(&mut self, f: &mut Frame, area: Rect) {
+    /// `speaker`: the output is the built-in speaker itself, so apps skip neiro by
+    /// mistake. Otherwise it's another device the user most likely chose.
+    fn draw_route_warning(&mut self, f: &mut Frame, area: Rect, out: &(String, String), speaker: bool) {
         let w = area.width.min(64);
-        let text = [
-            Line::from("Your speakers are the default output, so apps play".bold()),
-            Line::from("straight to them and skip neiro's processing.".bold()),
-            Line::from(""),
-            Line::from("This happens when neiro hasn't been chosen as an output yet,"),
-            Line::from("e.g. it started while a USB DAC or headphones were in use."),
-            Line::from("Your other devices keep their priority either way."),
-            Line::from(""),
-        ];
+        let (color, title, text, fix, keep) = if speaker {
+            (
+                Color::Yellow,
+                " ⚠ neiro is not in use ",
+                vec![
+                    Line::from("Your speakers are the default output, so apps play".bold()),
+                    Line::from("straight to them and skip neiro's processing.".bold()),
+                    Line::from(""),
+                    Line::from("This happens when neiro hasn't been chosen as an output yet,"),
+                    Line::from("e.g. it started while a USB DAC or headphones were in use."),
+                    Line::from("Your other devices keep their priority either way."),
+                    Line::from(""),
+                ],
+                " make Neiro DSP the default ",
+                " not now ",
+            )
+        } else {
+            let name: String = out.1.chars().take(w as usize - 10).collect();
+            (
+                Color::Cyan,
+                " Neiro DSP is not the output ",
+                vec![
+                    Line::from(vec!["Sound is going to ".bold(), name.clone().cyan().bold(), ",".bold()]),
+                    Line::from("without neiro's processing.".bold()),
+                    Line::from(""),
+                    Line::from("That's usually right: neiro's tuning is made for your laptop's"),
+                    Line::from("own speakers. Sound comes back through neiro when this device"),
+                    Line::from("goes away."),
+                    Line::from(""),
+                ],
+                " use Neiro DSP anyway ",
+                " keep it ",
+            )
+        };
         let h = text.len() as u16 + 3;
         let r = Rect::new(area.x + (area.width - w) / 2, area.y + area.height.saturating_sub(h) / 2, w, h.min(area.height));
-        let block = Block::bordered().border_style(Style::new().fg(Color::Yellow)).title(" ⚠ neiro is not in use ".yellow().bold());
+        let block = Block::bordered().border_style(Style::new().fg(color)).title(Span::styled(title, Style::new().fg(color).bold()));
         let inner = block.inner(r);
         f.render_widget(Clear, r);
-        f.render_widget(Paragraph::new(text.to_vec()).wrap(Wrap { trim: false }).block(block), r);
+        f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(block), r);
         let mut rb = RowBuilder::new(inner.x + 1, inner.y + inner.height.saturating_sub(1), self.mouse);
         rb.button(" d ", Style::new().reversed(), Hit::RouteFix(true))
-            .button(" make Neiro DSP the default ", Style::new(), Hit::RouteFix(true))
+            .button(fix, Style::new(), Hit::RouteFix(true))
             .text("   ", Style::new())
             .button(" esc ", Style::new().reversed(), Hit::RouteFix(false))
-            .button(" not now ", Style::new(), Hit::RouteFix(false));
+            .button(keep, Style::new(), Hit::RouteFix(false));
         let line = rb.finish(&mut self.hits);
         f.render_widget(Paragraph::new(line), Rect { y: inner.y + inner.height.saturating_sub(1), height: 1, ..inner });
     }
@@ -1446,16 +1483,23 @@ mod tests {
             pinned: true,
             personal,
             tuner,
-            speaker_is_default: false,
+            default_output: None,
         }
     }
 
     #[test]
-    fn warns_when_the_speaker_is_the_default() {
+    fn notices_when_neiro_is_not_the_output() {
         let mut app = App::new();
-        let mut st = fake_state(None);
-        st.speaker_is_default = true;
-        app.state = Some(st);
+        let speaker = ("alsa_output.speaker".to_string(), "Speaker".to_string());
+        let dac = ("alsa_output.usb-dac".to_string(), "Pumper USB DAC Analog Stereo".to_string());
+        let neiro = (SINK_NAME.to_string(), "Neiro DSP".to_string());
+        let set = |app: &mut App, o: &(String, String)| app.state.as_mut().unwrap().default_output = Some(o.clone());
+        app.state = Some(fake_state(None));
+        set(&mut app, &neiro);
+        assert!(!render(&mut app).contains("Neiro DSP is not"), "no notice while neiro is the output");
+
+        // The speaker itself: apps skip neiro by mistake.
+        set(&mut app, &speaker);
         let out = render(&mut app);
         println!("{out}");
         assert!(out.contains("neiro is not in use") && out.contains("make Neiro DSP the default"));
@@ -1463,13 +1507,22 @@ mod tests {
         app.key(KeyCode::Char(' '), KeyModifiers::NONE);
         app.key(KeyCode::Char('d'), KeyModifiers::NONE);
         assert!(matches!(app.sent.as_slice(), [Request::MakeDefault]), "sent {:?}", app.sent);
-        // Esc hides it, until the speaker stops being the default and becomes it again.
-        assert!(app.key(KeyCode::Esc, KeyModifiers::NONE), "esc must not quit while the warning shows");
+
+        // Another device: a notice naming it.
+        set(&mut app, &dac);
+        let out = render(&mut app);
+        println!("{out}");
+        assert!(out.contains("Neiro DSP is not the output") && out.contains("Pumper USB DAC Analog Stereo"));
+        assert!(out.contains("use Neiro DSP anyway"));
+        // Esc hides it, also across output changes, until neiro is the output again.
+        assert!(app.key(KeyCode::Esc, KeyModifiers::NONE), "esc must not quit while the notice shows");
+        assert!(!render(&mut app).contains("Neiro DSP is not"));
+        set(&mut app, &speaker);
         assert!(!render(&mut app).contains("neiro is not in use"));
-        app.state.as_mut().unwrap().speaker_is_default = false;
+        set(&mut app, &neiro);
         render(&mut app);
-        app.state.as_mut().unwrap().speaker_is_default = true;
-        assert!(render(&mut app).contains("neiro is not in use"));
+        set(&mut app, &dac);
+        assert!(render(&mut app).contains("Neiro DSP is not the output"));
     }
 
     fn render(app: &mut App) -> String {

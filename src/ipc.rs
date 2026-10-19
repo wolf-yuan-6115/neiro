@@ -87,9 +87,9 @@ pub struct StateView {
     pub personal: PersonalEq,
     #[serde(default)]
     pub tuner: Option<TunerView>,
-    /// The hardware speaker itself is the default output, so apps bypass neiro.
+    /// The current default output (node name, description), if any.
     #[serde(default)]
-    pub speaker_is_default: bool,
+    pub default_output: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

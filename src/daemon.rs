@@ -32,7 +32,7 @@ struct Inner {
     hw_comp_db: f32,
     pinned: bool,
     session: Option<Session>,
-    speaker_is_default: bool,
+    default_output: Option<(String, String)>,
     /// A client asked to make neiro the default; the monitor thread acts on it.
     want_default: bool,
 }
@@ -126,7 +126,7 @@ impl Inner {
             pinned: self.pinned,
             personal: self.saved.personal.clone(),
             tuner: self.session.as_ref().map(Session::view),
-            speaker_is_default: self.speaker_is_default,
+            default_output: self.default_output.clone(),
         }
     }
 
@@ -225,17 +225,17 @@ impl Inner {
 pub struct Controller(Mutex<Inner>);
 
 impl Controller {
-    /// Records whether the speaker is the default; returns a pending make-default request.
-    fn routing(&self, speaker_is_default: bool) -> bool {
+    /// Records the current default output; returns a pending make-default request.
+    fn routing(&self, output: Option<(String, String)>) -> bool {
         let mut i = self.0.lock().unwrap();
-        if speaker_is_default != i.speaker_is_default {
-            if speaker_is_default {
-                log::warn!("the speaker is the default output: apps bypass neiro");
-            } else {
-                log::info!("the speaker is no longer the default output");
+        if output.as_ref().map(|o| &o.0) != i.default_output.as_ref().map(|o| &o.0) {
+            match &output {
+                Some((name, _)) if *name == i.target => log::warn!("the speaker is the default output: apps bypass neiro"),
+                Some((name, desc)) => log::info!("default output: {desc} ({name})"),
+                None => log::info!("no default output"),
             }
         }
-        i.speaker_is_default = speaker_is_default;
+        i.default_output = output;
         std::mem::take(&mut i.want_default)
     }
 
@@ -413,7 +413,7 @@ pub fn run(tuning_override: Option<std::path::PathBuf>) -> Result<()> {
         hw_comp_db: initial_comp,
         pinned: false,
         session: None,
-        speaker_is_default: false,
+        default_output: None,
         want_default: false,
     };
     let engine = Engine::new(RATE as f32, &tuning, inner.config());
@@ -564,13 +564,31 @@ fn monitor(target: &str, hw_volume: f32, restore: &Mutex<Restore>, ctl: &Control
             out_id = system::node_id("output.neiro");
         }
         let eff = system::default_name("default.audio.sink");
-        if eff != last_eff {
-            log::info!("default output: {}", eff.as_deref().unwrap_or("none"));
-            last_eff = eff.clone();
+        if eff != last_eff.as_ref().map(|o: &(String, String)| o.0.clone()) {
+            // Look the description up only when the output changes.
+            last_eff = eff.map(|name| {
+                let desc = system::nodes().ok().and_then(|ns| ns.into_iter().find(|n| n.name == name)).map(|n| n.description);
+                (name.clone(), desc.filter(|d| !d.is_empty()).unwrap_or(name))
+            });
         }
-        let speaker_default = eff.as_deref() == Some(target);
-        if ctl.routing(speaker_default) && speaker_default {
-            become_default(target, sink_id, spk_id, &mut restore.lock().unwrap());
+        if ctl.routing(last_eff.clone()) {
+            let mut r = restore.lock().unwrap();
+            match last_eff.as_ref().map(|o| o.0.as_str()) {
+                Some(SINK_NAME) => {}
+                // Standing in for the speaker keeps the user's other devices' priority.
+                Some(n) if n == target => become_default(target, sink_id, spk_id, &mut r),
+                // Another device is playing and the user asked for neiro anyway: like
+                // choosing it in the sound menu, it becomes the configured default.
+                _ => {
+                    let prev = system::get_default(SINK_KEY);
+                    log::info!("{SINK_NAME} is now the configured default (was {})", prev.as_deref().unwrap_or("unset"));
+                    if let Err(e) = system::set_default(SINK_KEY, Some(&serde_json::json!({ "name": SINK_NAME }).to_string())) {
+                        log::warn!("making {SINK_NAME} the default: {e:#}");
+                    }
+                    r.default_sink.get_or_insert(prev);
+                    save_restore(&r);
+                }
+            }
         }
         let Ok(links) = system::links() else { continue };
         let foreign = links.iter().any(|&(o, i)| i == spk_id && Some(o) != out_id);

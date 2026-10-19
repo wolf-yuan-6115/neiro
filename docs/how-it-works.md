@@ -16,8 +16,9 @@ jump to the top. A device you prefer, such as a USB DAC or Bluetooth headphones,
 over when you plug it in, and sound comes back through neiro when you unplug it. That's the
 same as without neiro, with Neiro DSP in place of the speaker.
 
-If the speaker itself becomes the default, apps skip neiro, and the TUI offers to fix it.
-This can happen when neiro started while another device was in use.
+Whenever Neiro DSP isn't the output, the TUI says so and offers to switch to it:
+- **The speaker itself is the default** (a warning): apps skip neiro by mistake. This can happen when neiro started while another device was in use.
+- **Another device is the default**: usually what you want, since neiro's tuning is for the built-in speakers.
 
 ## Speaker volume
 
