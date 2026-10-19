@@ -282,12 +282,16 @@ struct App {
     /// The user hid the "not through neiro" notice; it can show again once
     /// Neiro DSP has been the output.
     route_dismissed: bool,
+    /// When the full state was last received.
+    last_state: Instant,
     /// Requests issued, recorded so tests can check what a click did.
     #[cfg(test)]
     sent: Vec<Request>,
 }
 
 const VU_FLOOR: f32 = -60.0;
+/// How often to refresh the daemon state that isn't sent with our own requests.
+const STATE_POLL: Duration = Duration::from_millis(500);
 const HOLD_SECS: f32 = 1.0;
 const HOLD_DECAY_DB_S: f32 = 20.0;
 
@@ -335,6 +339,7 @@ impl App {
             drag: None,
             pick_offset: 0,
             route_dismissed: false,
+            last_state: Instant::now(),
             #[cfg(test)]
             sent: vec![],
         }
@@ -387,6 +392,7 @@ impl App {
                         _ => {}
                     }
                     self.state = Some(s);
+                    self.last_state = Instant::now();
                 }
                 if let Some(m) = r.meters {
                     for k in 0..4 {
@@ -413,6 +419,11 @@ impl App {
             self.connect();
             if self.client.is_some() {
                 self.request(Request::Meters);
+                // The daemon changes some state on its own (default output, speaker
+                // volume), so don't rely on our own requests to refresh it.
+                if self.last_state.elapsed() >= STATE_POLL {
+                    self.request(Request::GetState);
+                }
             }
             term.draw(|f| self.draw(f))?;
             // Wait briefly for input, then drain whatever queued up (mouse motion is chatty).
