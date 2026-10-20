@@ -50,8 +50,12 @@ Click **IDLE** or **NOT IN USE** to switch back to Neiro DSP.
 Hold `Shift` to select text in the terminal while the TUI is open.
 
 **Meters:**
-- The bottom panel shows how much each frequency band is being held back. As you turn up
-  bass-heavy music, watch the bands your chassis resonates at get limited.
+- **Per-band processing** (the bottom panel) has one column per frequency band:
+  - The **bars** show how far each band is turned down to protect the speaker, by the
+    multiband compressor and the regulator. As you turn up bass-heavy music, watch the bands
+    your chassis resonates at get limited.
+  - The **numbers** under the bars are the Intelligent EQ's current boost (cyan) or cut
+    (magenta) in dB. They follow the music's average spectrum, so they change slowly.
 - The **Levels** panel shows input and output loudness.
 
 The **Personal EQ** stage has the [blind A/B tuner](tuner.md).

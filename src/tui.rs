@@ -1345,12 +1345,26 @@ impl App {
             None => {
                 let bass = if m.bass_db > 0.05 { format!(" · bass {:+.1} dB", m.bass_db) } else { String::new() };
                 format!(
-                    " Dynamics gain reduction per band · in {:>6.1} dBFS · out {:>6.1} dBFS · limiter {:>5.1} dB{bass} ",
+                    " Per-band processing · in {:>6.1} dBFS · out {:>6.1} dBFS · limiter {:>5.1} dB{bass} ",
                     m.in_peak_db, m.out_peak_db, m.limiter_gr_db
                 )
             }
         };
-        let block = Block::new().borders(Borders::ALL).title(if hovered.is_some() { Line::from(title).cyan() } else { Line::from(title) });
+        // The panel shows two things; say which is which.
+        let key = Line::from(vec![
+            Span::raw(" bars: ").dim(),
+            Span::styled("▀▀", Style::new().fg(Color::Green)),
+            Span::raw(" turned down to protect the speaker · numbers: ").dim(),
+            Span::styled("+boost", Style::new().fg(Color::Cyan)),
+            Span::raw("/").dim(),
+            Span::styled("-cut", Style::new().fg(Color::Magenta)),
+            Span::raw(" by Intelligent EQ (dB) ").dim(),
+        ])
+        .right_aligned();
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .title(if hovered.is_some() { Line::from(title).cyan() } else { Line::from(title) })
+            .title_bottom(key);
         f.render_widget(block, area);
         let bar_rows = inner.height.saturating_sub(2) as usize;
         let scale = 24.0 / bar_rows.max(1) as f32; // dB per row
