@@ -35,7 +35,11 @@ workflow:
     key:
       files: [Cargo.lock]
     paths:
+      # bin/ with cargo's install records, or `cargo install` refuses to
+      # overwrite binaries it didn't record installing.
       - .cargo-home/bin/
+      - .cargo-home/.crates.toml
+      - .cargo-home/.crates2.json
       - .cargo-home/registry/index/
       - .cargo-home/registry/cache/
       - .cargo-home/git/db/
@@ -78,7 +82,7 @@ deb:
   stage: package
   needs: [build]
   script:
-    - cargo install --locked "cargo-deb@${CARGO_DEB_VERSION}"
+    - cargo deb --version 2>/dev/null | grep -qF "$CARGO_DEB_VERSION" || cargo install --locked --force "cargo-deb@${CARGO_DEB_VERSION}"
     - cargo deb --no-build --locked --output dist/
   artifacts:
     paths:
@@ -90,7 +94,7 @@ rpm:
   stage: package
   needs: [build]
   script:
-    - cargo install --locked "cargo-generate-rpm@${CARGO_GENERATE_RPM_VERSION}"
+    - cargo generate-rpm --version 2>/dev/null | grep -qF "$CARGO_GENERATE_RPM_VERSION" || cargo install --locked --force "cargo-generate-rpm@${CARGO_GENERATE_RPM_VERSION}"
     - cargo generate-rpm --output dist/
   artifacts:
     paths:
