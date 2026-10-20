@@ -12,6 +12,8 @@ pub const HOP: usize = FFT_N / 4;
 /// End-to-end latency in samples of the band processor.
 pub const LATENCY: usize = FFT_N;
 pub const MAX_GROUPS: usize = 4;
+/// dB to log2 of the linear amplitude gain: 10^(dB/20) = 2^(dB * log2(10) / 20).
+const DB_TO_LOG2: f32 = std::f32::consts::LOG2_10 / 20.0;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MbcGroupCfg {
@@ -418,7 +420,7 @@ impl BandProcessor {
                 if c == 0 || totals[1] != totals[0] {
                     for (k, &(b0, b1, fr)) in self.bin_interp.iter().enumerate() {
                         let db = total[b0] + (total[b1] - total[b0]) * fr;
-                        self.bin_gain[k] = 10f32.powf(db / 20.0);
+                        self.bin_gain[k] = (db * DB_TO_LOG2).exp2();
                     }
                 }
                 for (x, g) in self.spec[c].iter_mut().zip(&self.bin_gain) {
