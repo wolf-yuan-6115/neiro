@@ -518,9 +518,12 @@ pub fn sections(p: &Params, band_freqs: &[f32; NBANDS]) -> Vec<Section> {
         let name = PE_NAMES[i];
         personal.push(f(format!("/personal/bands/{i}/gain_db"), format!("{name} gain"), -PE_MAX_GAIN, PE_MAX_GAIN, 0.5, "dB"));
         personal.push(f(format!("/personal/bands/{i}/freq"), format!("{name} freq"), lo, hi, if hi > 3000.0 { 100.0 } else { 5.0 }, "Hz"));
-        if PE_KINDS[i] == PeKind::Peak {
-            personal.push(f(format!("/personal/bands/{i}/q"), format!("{name} Q"), 0.3, 4.0, 0.1, ""));
-        }
+        personal.push(if PE_KINDS[i] == PeKind::Peak {
+            f(format!("/personal/bands/{i}/q"), format!("{name} Q"), 0.3, 4.0, 0.1, "")
+        } else {
+            // 0.707 is the plain Butterworth shelf; higher adds a bump at the corner.
+            f(format!("/personal/bands/{i}/q"), format!("{name} Q"), 0.4, 2.0, 0.05, "")
+        });
     }
     vec![
         sec("Personal EQ", Some("/personal/enable"), personal),
