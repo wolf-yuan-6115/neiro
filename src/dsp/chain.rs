@@ -334,8 +334,23 @@ impl PersonalChain {
         let target = if cfg.side == 1 { 1.0 } else { 0.0 };
         if pa == pb && self.mix == 0.0 {
             if pa.enable {
-                for i in 0..l.len() {
-                    (l[i], r[i]) = Self::run(&mut self.st[0], pa, l[i], r[i]);
+                if pa.gain != 1.0 {
+                    for i in 0..l.len() {
+                        l[i] *= pa.gain;
+                        r[i] *= pa.gain;
+                    }
+                }
+                let [sl, sr] = &mut self.st[0];
+                for k in 0..PE_BANDS {
+                    let c = &pa.coefs[k];
+                    // A 0 dB band at rest is an exact pass-through.
+                    if c.is_unity() && sl[k].is_zero() && sr[k].is_zero() {
+                        continue;
+                    }
+                    for i in 0..l.len() {
+                        l[i] = sl[k].run(c, l[i]);
+                        r[i] = sr[k].run(c, r[i]);
+                    }
                 }
             }
             return;
@@ -431,31 +446,47 @@ impl Engine {
             run_wet(&self.cfg, &mut self.wide, &mut self.peq, &mut self.vb, &mut self.personal, &mut self.bands, &mut self.lim, l, r);
 
             let target = if self.cfg.bypass { 1.0 } else { 0.0 };
-            for i in 0..n {
-                let (dl, dr) = (self.dry[0][self.dry_idx], self.dry[1][self.dry_idx]);
-                self.dry[0][self.dry_idx] = in_l[start + i];
-                self.dry[1][self.dry_idx] = in_r[start + i];
-                self.dry_idx = (self.dry_idx + 1) % LATENCY;
-                if self.mix != target {
-                    self.mix = if target > self.mix {
-                        (self.mix + self.mix_step).min(1.0)
+            let (out_l, out_r) = (&mut out_l[start..end], &mut out_r[start..end]);
+            if self.mix == target {
+                // Settled on one path: block copies, up to the wrap of the dry delay line.
+                let mut i = 0;
+                while i < n {
+                    let (a, m) = (self.dry_idx, (n - i).min(LATENCY - self.dry_idx));
+                    for (c, (input, out, wet)) in [(in_l, &mut *out_l, &*l), (in_r, &mut *out_r, &*r)].into_iter().enumerate() {
+                        let delayed = &mut self.dry[c][a..a + m];
+                        out[i..i + m].copy_from_slice(if target == 1.0 { delayed } else { &wet[i..i + m] });
+                        delayed.copy_from_slice(&input[start + i..start + i + m]);
+                    }
+                    self.dry_idx = (a + m) % LATENCY;
+                    i += m;
+                }
+            } else {
+                for i in 0..n {
+                    let (dl, dr) = (self.dry[0][self.dry_idx], self.dry[1][self.dry_idx]);
+                    self.dry[0][self.dry_idx] = in_l[start + i];
+                    self.dry[1][self.dry_idx] = in_r[start + i];
+                    self.dry_idx = (self.dry_idx + 1) % LATENCY;
+                    if self.mix != target {
+                        self.mix = if target > self.mix {
+                            (self.mix + self.mix_step).min(1.0)
+                        } else {
+                            (self.mix - self.mix_step).max(0.0)
+                        };
+                    }
+                    (out_l[i], out_r[i]) = if self.mix >= 1.0 {
+                        (dl, dr)
+                    } else if self.mix <= 0.0 {
+                        (l[i], r[i])
                     } else {
-                        (self.mix - self.mix_step).max(0.0)
+                        (l[i] + (dl - l[i]) * self.mix, r[i] + (dr - r[i]) * self.mix)
                     };
                 }
-                let (ol, or) = if self.mix >= 1.0 {
-                    (dl, dr)
-                } else if self.mix <= 0.0 {
-                    (l[i], r[i])
-                } else {
-                    (l[i] + (dl - l[i]) * self.mix, r[i] + (dr - r[i]) * self.mix)
-                };
-                out_l[start + i] = ol;
-                out_r[start + i] = or;
-                peak[2] = peak[2].max(ol.abs());
-                peak[3] = peak[3].max(or.abs());
-                sumsq[2] += ol * ol;
-                sumsq[3] += or * or;
+            }
+            for i in 0..n {
+                peak[2] = peak[2].max(out_l[i].abs());
+                peak[3] = peak[3].max(out_r[i].abs());
+                sumsq[2] += out_l[i] * out_l[i];
+                sumsq[3] += out_r[i] * out_r[i];
             }
         }
         let n = in_l.len().max(1) as f32;
@@ -507,11 +538,21 @@ fn run_wet(
             r[i] = m - s;
         }
     }
-    for (ch, buf) in [l.as_mut(), r.as_mut()].into_iter().enumerate() {
-        for k in 0..cfg.peq_count[ch] {
+    // Both channels in one loop: two independent recursions run faster than one.
+    let both = cfg.peq_count[0].min(cfg.peq_count[1]);
+    let [pl, pr] = peq;
+    for k in 0..both {
+        let (cl, cr) = (&cfg.peq[0][k], &cfg.peq[1][k]);
+        for i in 0..n {
+            l[i] = pl[k].run(cl, l[i]);
+            r[i] = pr[k].run(cr, r[i]);
+        }
+    }
+    for (ch, buf, st) in [(0, &mut *l, &mut *pl), (1, &mut *r, &mut *pr)] {
+        for k in both..cfg.peq_count[ch] {
             let c = &cfg.peq[ch][k];
             for x in buf.iter_mut() {
-                *x = peq[ch][k].run(c, *x);
+                *x = st[k].run(c, *x);
             }
         }
     }

@@ -14,6 +14,12 @@ pub struct Coefs {
 impl Coefs {
     pub const IDENTITY: Coefs = Coefs { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
 
+    /// Numerator equals denominator, as for a 0 dB peak or shelf: from a zero
+    /// state the filter passes its input through unchanged.
+    pub fn is_unity(&self) -> bool {
+        self.b0 == 1.0 && self.b1 == self.a1 && self.b2 == self.a2
+    }
+
     fn norm(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Coefs {
         Coefs { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 }
     }
@@ -122,6 +128,10 @@ impl State {
             self.z2 = 0.0;
         }
         y as f32
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.z1 == 0.0 && self.z2 == 0.0
     }
 
     pub fn reset(&mut self) {

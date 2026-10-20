@@ -255,12 +255,17 @@ impl BandProcessor {
 
     pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
         let base = FFT_N - HOP;
-        for i in 0..l.len() {
-            self.inbuf[0][base + self.pos] = l[i];
-            self.inbuf[1][base + self.pos] = r[i];
-            l[i] = self.outbuf[0][self.pos];
-            r[i] = self.outbuf[1][self.pos];
-            self.pos += 1;
+        let mut i = 0;
+        while i < l.len() {
+            // Up to the next hop boundary at a time.
+            let n = (HOP - self.pos).min(l.len() - i);
+            for (c, x) in [&mut *l, &mut *r].into_iter().enumerate() {
+                let x = &mut x[i..i + n];
+                self.inbuf[c][base + self.pos..base + self.pos + n].copy_from_slice(x);
+                x.copy_from_slice(&self.outbuf[c][self.pos..self.pos + n]);
+            }
+            self.pos += n;
+            i += n;
             if self.pos == HOP {
                 self.pos = 0;
                 self.frame();
@@ -402,17 +407,23 @@ impl BandProcessor {
 
         // Synthesis.
         let scale = 1.0 / (FFT_N as f32 * 2.0);
+        let totals: [[f32; NBANDS]; 2] = std::array::from_fn(|c| {
+            std::array::from_fn(|b| cfg.static_db[c][b] + ieq[b] + lb[b] + mbc_db[b] + reg_db[b] + cfg.volmax_db)
+        });
         for c in 0..2 {
-            let mut total = [0f32; NBANDS];
-            for b in 0..NBANDS {
-                total[b] = cfg.static_db[c][b] + ieq[b] + lb[b] + mbc_db[b] + reg_db[b] + cfg.volmax_db;
-            }
-            for (k, &(b0, b1, fr)) in self.bin_interp.iter().enumerate() {
-                let db = total[b0] + (total[b1] - total[b0]) * fr;
-                self.bin_gain[k] = 10f32.powf(db / 20.0);
-            }
-            for (x, g) in self.spec[c].iter_mut().zip(&self.bin_gain) {
-                *x *= *g;
+            let total = &totals[c];
+            // 0 dB everywhere is a gain of exactly 1.
+            if total.iter().any(|&d| d != 0.0) {
+                // The right channel usually gets the same gains as the left.
+                if c == 0 || totals[1] != totals[0] {
+                    for (k, &(b0, b1, fr)) in self.bin_interp.iter().enumerate() {
+                        let db = total[b0] + (total[b1] - total[b0]) * fr;
+                        self.bin_gain[k] = 10f32.powf(db / 20.0);
+                    }
+                }
+                for (x, g) in self.spec[c].iter_mut().zip(&self.bin_gain) {
+                    *x *= *g;
+                }
             }
             let last = self.spec[c].len() - 1;
             self.spec[c][0].im = 0.0;
