@@ -1,5 +1,6 @@
 //! Small wrappers around `pw-dump`, `wpctl` and `pw-metadata` for default-sink
-//! and hardware-volume handling. These run outside the audio path only.
+//! and hardware-volume handling: writes, and reads before the main loop starts
+//! or after it stops. While it runs, `graph` mirrors the graph instead.
 
 use anyhow::{anyhow, Context, Result};
 use std::process::{Command, Output};
@@ -137,23 +138,6 @@ pub fn set_default(key: &str, json: Option<&str>) -> Result<()> {
         return Err(anyhow!("pw-metadata failed"));
     }
     Ok(())
-}
-
-/// All links as (output node id, input node id).
-pub fn links() -> Result<Vec<(u32, u32)>> {
-    let out = run(&mut Command::new("pw-dump"))?;
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    Ok(v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("PipeWire:Interface:Link"))
-                .filter_map(|o| {
-                    let i = o.get("info")?;
-                    Some((i.get("output-node-id")?.as_u64()? as u32, i.get("input-node-id")?.as_u64()? as u32))
-                })
-                .collect()
-        })
-        .unwrap_or_default())
 }
 
 /// PipeWire's user-facing volume is cubic: dB = 60 * log10(v).

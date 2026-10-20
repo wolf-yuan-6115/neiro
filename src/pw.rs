@@ -4,6 +4,7 @@
 //! playback process callback so no extra buffering latency is added.
 
 use crate::dsp::chain::{Config, Engine, SharedMeters};
+use crate::graph::{self, Graph};
 use anyhow::Result;
 use pipewire as pw;
 use pw::properties::properties;
@@ -84,10 +85,12 @@ fn format_pod() -> Vec<u8> {
     .into_inner()
 }
 
-/// Runs the PipeWire main loop until SIGINT/SIGTERM. `target` is the hardware sink's node.name.
+/// Runs the PipeWire main loop until SIGINT/SIGTERM. `target` is the hardware
+/// sink's node.name. While the loop runs, `graph` mirrors the PipeWire graph.
 pub fn run(
     mut rt: RtState,
     target: &str,
+    graph: Arc<Graph>,
     on_started: impl FnOnce() + 'static,
     on_quit: impl FnOnce(),
 ) -> Result<()> {
@@ -95,6 +98,7 @@ pub fn run(
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None)?;
+    let _watcher = graph::watch(&core, target, graph)?;
 
     let playback = StreamRc::new(
         core.clone(),

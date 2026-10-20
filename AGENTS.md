@@ -83,13 +83,15 @@ parameter descriptors.
 
 The matching rules follow the speaker-tuning-to-easyeffects project's findings.
 
-**Daemon system integration** (`daemon.rs`, `system.rs`) shells out to `pw-dump`, `wpctl` and `pw-metadata`:
+**Daemon system integration** (`daemon.rs`, `graph.rs`, `system.rs`):
+- `graph.rs` mirrors the PipeWire graph from registry events on the main loop: nodes, links, the `default` metadata, and the Props volume of the speaker and `neiro_sink`. The monitor thread wakes on its changes; nothing polls.
+- Writes (volume, mute, default sink) and the reads before the main loop starts or after it stops shell out to `pw-dump`, `wpctl` and `pw-metadata` (`system.rs`).
 - The speaker sink is `speaker_sink` from `state.toml` if set. Otherwise `system::find_speaker` considers only built-in ALSA sinks (never USB, HDMI/DisplayPort, headphone or Bluetooth, even when one is the default). It takes the one whose name or description says "speaker", or the only one left.
 - At start, if the speaker (or neiro) is the default sink, `become_default` makes `neiro_sink` the default and copies the speaker's volume and mute onto it:
   - If the configured default is another, absent device (a USB DAC, Bluetooth), neiro leaves it configured. It re-selects the sinks above the speaker in WirePlumber's history (`~/.local/state/wireplumber/default-nodes`), so `neiro_sink` lands just above the speaker. That device still wins when it returns (`Restore::stand_in`).
   - Otherwise it takes the configured slot and restores it on exit.
 - `StateView::default_output` is the effective default sink. When it isn't `neiro_sink`, the TUI shows a modal notice: a warning when it's the speaker (apps skip neiro by mistake), an info notice for any other device. `Request::MakeDefault` is acted on by the monitor thread: `become_default` when the speaker is the default, otherwise neiro takes the configured slot, like choosing it in the sound menu.
-- A 1 s monitor loop pins the hardware speaker to 100% **only while nothing but `output.neiro` feeds it**. It unpins immediately otherwise.
+- The monitor pins the hardware speaker to 100% **only while nothing but `output.neiro` feeds it**. It unpins immediately otherwise.
 - The regulator thresholds are always offset by the real speaker volume (`hw_comp_db`).
 - Restore info is mirrored to `$XDG_RUNTIME_DIR/neiro.restore.json` for crash recovery on the next start.
 - Shutdown order is load-bearing (see `on_quit`):

@@ -3,6 +3,7 @@ mod discover;
 mod clip;
 mod demo;
 mod dsp;
+mod graph;
 mod ipc;
 mod logging;
 mod params;
