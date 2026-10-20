@@ -18,7 +18,7 @@ set by hand:
 |---|---|
 | `mode` | The tuning's operating mode on convertibles, e.g. `"tablet"`. `neiro dump-tuning` lists them. |
 | `speaker_sink` | PipeWire name of your built-in speaker, if neiro picks the wrong sink. By default it takes the ALSA sink whose name says "speaker". |
-| `hw_volume` | Holds the speaker below 100% while neiro runs (0 to 1). |
+| `hw_volume` | Holds the speaker below 100% while neiro runs (0 to 1). Caps the loudest output; see [Speaker safety](speaker-safety.md). |
 | `tuning_path` | Uses a tuning from elsewhere. `neiro daemon --tuning <file>` does the same for one run. |
 
 Restart the daemon after changing them.

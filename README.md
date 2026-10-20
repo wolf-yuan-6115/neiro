@@ -33,6 +33,10 @@ laptop's factory tuning as a PipeWire filter, with a terminal UI to control it.
 - Rust, clang and the PipeWire headers to build from source
 - ffmpeg (optional, for the A/B tuner)
 
+> **Speaker safety:** like Dolby on Windows, neiro drives your speakers harder than plain
+> Linux does. Its protection follows the factory tuning, but parts of it are inferred, and
+> it can be turned off. Read [Speaker safety](docs/speaker-safety.md) before raising the limits.
+
 ## Getting started
 
 **1. Install neiro**
@@ -104,6 +108,7 @@ switches profile, and `neiro status` shows what's running.
 - [Configuration](docs/configuration.md): files and settings
 - [How it works](docs/how-it-works.md): signal path, volume handling, the processing chain
 - [Compatibility](docs/compatibility.md): what's been tested, speakers, reporting your laptop
+- [Speaker safety](docs/speaker-safety.md): long-term wear, what protects the speakers, settings to be careful with
 - [Troubleshooting](docs/troubleshooting.md)
 
 ## Credits

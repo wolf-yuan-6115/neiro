@@ -25,7 +25,8 @@ Whenever Neiro DSP isn't the output, the TUI says so and offers to switch to it:
 While nothing else plays directly to the speaker, neiro holds the hardware speaker at 100%
 and your volume keys work on Neiro DSP instead. If another app uses the speaker directly,
 its own volume comes back immediately. The limiting thresholds always account for the real
-speaker volume.
+speaker volume. [Speaker safety](speaker-safety.md) covers what that protection can and
+can't do.
 
 When neiro stops, it fades out and gives the speaker back your volume and mute before
 switching your apps over, so there's no pop and no burst at full volume. After a crash,
