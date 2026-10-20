@@ -127,7 +127,11 @@ The matching rules follow the speaker-tuning-to-easyeffects project's findings.
 - an `.rpm`, via `cargo generate-rpm`.
 
 Both package tools read their metadata from `Cargo.toml`. A `v<version>` tag that matches
-`Cargo.toml` also uploads the artifacts to the package registry and creates a release. The
+`Cargo.toml` also uploads the artifacts to the package registry and creates a release.
+Its notes come from `packaging/release-notes.sh`. It groups the commit subjects since the
+previous tag: `feat`, `fix` and `perf` first, then every other type under "Other changes".
+So commit subjects double as the changelog.
+Preview them with `packaging/release-notes.sh <version> HEAD`. The
 systemd user unit lives in `packaging/neiro.service`.
 
 - **Old PipeWire headers:** the code must compile against PipeWire 0.3.65. Use numeric
